@@ -18,7 +18,9 @@ cp /mnt/usb/openwrt_chroot_rootfs.tar.gz /tmp
 
 ```
 Run the Loader
+
 Connect to your router via SSH and execute the following:
+
 Assuming you have root access
 ```bash
 chmod +x /tmp/loader.sh
