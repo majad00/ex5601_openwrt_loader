@@ -1,0 +1,14 @@
+Package: luci-app-package-manager
+Version: 25.168.50434~d6b13f6
+Depends: libc, luci-base
+Provides: luci-app-opkg
+Source: feeds/luci/applications/luci-app-package-manager
+SourceName: luci-app-package-manager
+License: Apache-2.0
+Section: luci
+SourceDateEpoch: 1750168834
+URL: https://github.com/openwrt/luci
+Maintainer: OpenWrt LuCI community
+Architecture: all
+Installed-Size: 51200
+Description:  Package management application

@@ -1,0 +1,3 @@
+/lib/modules/6.6.93/xhci-mtk-hcd.ko
+/etc/modules.d/54-usb-xhci-mtk
+/etc/modules-boot.d/54-usb-xhci-mtk

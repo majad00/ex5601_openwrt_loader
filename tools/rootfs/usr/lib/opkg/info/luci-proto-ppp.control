@@ -1,0 +1,13 @@
+Package: luci-proto-ppp
+Version: 25.168.50434~d6b13f6
+Depends: libc
+Source: feeds/luci/protocols/luci-proto-ppp
+SourceName: luci-proto-ppp
+License: Apache-2.0
+Section: luci
+SourceDateEpoch: 1750168834
+URL: https://github.com/openwrt/luci
+Maintainer: OpenWrt LuCI community
+Architecture: all
+Installed-Size: 30720
+Description:  Support for PPP/PPPoE/PPPoA/PPtP

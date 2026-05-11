@@ -1,0 +1,4 @@
+/sbin/logd
+/usr/share/acl.d/logd.json
+/usr/libexec/logread-ubox
+/etc/init.d/log

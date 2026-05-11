@@ -2,7 +2,7 @@
 This repository includes tools and a guide on how to install OpenWrt on the Zyxel EX5601-T0 router. These tools and scripts are designed to make installation possible without disassembly or requiring a UART connection, making the process as user-friendly as possible.
 
 Quick Start Guide
-Download the RootFS Archive
+Download the RootFS Archive (openwrt_chroot_rootfs.tar.gz) or create your own follow the README.md inside /tools/rootfs
 Download the openwrt_chroot_rootfs.tar.gz and the loader.sh script from the /tools folder.
 
 Upload to Router
