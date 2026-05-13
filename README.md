@@ -4,33 +4,12 @@ This repository provides tools and instructions for installing OpenWrt on the Zy
 
 The installer does **not** require opening the router or using UART. It runs from the OEM firmware, starts a temporary OpenWrt/LuCI environment in RAM, and flashes OpenWrt to the inactive firmware slot.
 
-The current installer supports the **stock OEM partition layout**.
+
 
 > [!WARNING]
 > This tool is designed to reduce the risk of bricking by flashing the inactive slot, but Power loss during flash can brick the device.
 > Keep backups of important MTD partitions before flash, you can do this using LUCI during flash.
----
 
-## Current status
-
-Supported:
-
-- Open source all codes are available, build your own bundle
-- No-UART require, safe flashing on inactive bank
-- Support all Openwrt versions design for stock-layout
-- Automatic handling of `ubi` / `ubi2` slot selection
-- Error handling on each step
-
-Not yet supported:
-
-- OpenWrt `ubootmod` layout conversion
-- Restoring OEM from OpenWrt
-
-Work in progress:
-
-- U-Boot MOD layout conversion from the Matrix LuCI interface
-
----
 ## Beginner's Guide  
 Download the installation bundle from /tools ( two files)
 1) Miniroot Archive (openwrt_chroot_rootfs.tar.gz)
@@ -111,3 +90,26 @@ cp openwrt_ubi.bin openwrt_ubi2.bin ../rootfs/etc/
 # 5. Create the rootfs archive
 cd ../rootfs
 tar -cpzf ../openwrt_chroot_rootfs.tar.gz . ; cd ..
+
+
+---
+
+## Current status
+The current installer supports the **stock OEM partition layout**.
+
+- Open source all codes are available, build your own bundle
+- No-UART require, safe flashing on inactive bank
+- Support all Openwrt versions design for stock-layout
+- Automatic handling of `ubi` / `ubi2` slot selection
+- Error handling on each step
+
+Not yet supported:
+
+- OpenWrt `ubootmod` layout conversion
+- Restoring OEM from OpenWrt
+
+Work in progress:
+
+- U-Boot MOD layout conversion from the Matrix LuCI interface
+
+---
