@@ -90,14 +90,12 @@ cp openwrt_ubi.bin openwrt_ubi2.bin ../rootfs/etc/
 # 5. Create the rootfs archive
 cd ../rootfs
 tar -cpzf ../openwrt_chroot_rootfs.tar.gz . ; cd ..
-
-
----
+```  
 
 ## Current status
 The current installer supports the **stock OEM partition layout**.
 
-- Open source all codes are available, build your own bundle
+- Fully Open source as all codes are available, build your own bundle
 - No-UART require, safe flashing on inactive bank
 - Support all Openwrt versions design for stock-layout
 - Automatic handling of `ubi` / `ubi2` slot selection
@@ -112,4 +110,4 @@ Work in progress:
 
 - U-Boot MOD layout conversion from the Matrix LuCI interface
 
----
+
