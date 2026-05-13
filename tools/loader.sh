@@ -1,66 +1,123 @@
 #!/bin/sh
+# written by majad.qureshi@lut.fi
+# Zyxel EX5601-T0 OpenWrt Matrix Loader
 
-#written by majad.qureshi@lut.fi
 MATRIX="/tmp/openwrt_matrix"
 ARCHIVE_NAME="openwrt_chroot_rootfs.tar.gz"
 ARCHIVE_PATH="/tmp/$ARCHIVE_NAME"
+FLASH_DIR="/tmp/matrix-flash"
+
+fail() {
+	echo "ERROR: $*" >&2
+	exit 1
+}
+
+is_mounted() {
+	grep -q " $1 " /proc/mounts
+}
 
 echo "================================================"
-echo "      Zyxel EX5601-T0 OpenWrt Matrix Loader      "
+echo "      Zyxel EX5601-T0 OpenWrt Matrix Loader"
 echo "================================================"
 
 echo -n "Starting > > " > /dev/console
-for i in $(seq 1 2); do
-    echo -n " > " > /dev/console
-    sleep 1
+for i in 1 2; do
+	echo -n " > " > /dev/console
+	sleep 1
 done
 
-if [ ! -f "$ARCHIVE_PATH" ]; then
-    echo "ERROR: $ARCHIVE_NAME not found in /tmp!"
-    exit 1
-fi
+[ -f "$ARCHIVE_PATH" ] || fail "$ARCHIVE_NAME not found in /tmp"
 
-FREE_TMP=$(df -m /tmp | awk 'NR==2 {print $4}')
-if [ "$FREE_TMP" -lt 100 ]; then
-    echo "ERROR: Insufficient RAM in /tmp (${FREE_TMP}MB). Need 100MB+."
-    exit 1
-fi
+FREE_TMP="$(df -m /tmp | awk 'NR==2 {print $4}')"
+[ "$FREE_TMP" -ge 100 ] || fail "insufficient RAM in /tmp (${FREE_TMP}MB). Need 100MB+"
 
 echo " Extracting RootFS..."
+
+rm -rf "$MATRIX"
 mkdir -p "$MATRIX"
-tar -xzf "$ARCHIVE_PATH" -C "$MATRIX"
-if [ $? -ne 0 ]; then
-    echo "ERROR: Extraction failed!"
-    exit 1
-fi
-rm "$ARCHIVE_PATH"
+
+tar -xzf "$ARCHIVE_PATH" -C "$MATRIX" || fail "extraction failed"
+
+rm -f "$ARCHIVE_PATH"
+
 echo "[OK] Extraction complete. Archive removed to save RAM."
 
+echo " Installing Matrix files..."
+
+cp "$MATRIX/etc/openwrt_ubi.bin" /tmp/ 2>/dev/null || true
+cp "$MATRIX/etc/openwrt_ubi2.bin" /tmp/ 2>/dev/null || true
+cp "$MATRIX/etc/matrix_flash_inactive.sh" /tmp/ || fail "matrix_flash_inactive.sh missing"
+cp "$MATRIX/etc/matrix_flash_runner.sh" /tmp/ || fail "matrix_flash_runner.sh missing"
+
+chmod +x /tmp/matrix_flash_inactive.sh
+chmod +x /tmp/matrix_flash_runner.sh
+
+mkdir -p "$FLASH_DIR"
+
+echo "[OK] Matrix files installed."
+
 echo " Preparing Environment..."
-iptables -F
-iptables -P INPUT ACCEPT
-iptables -P FORWARD ACCEPT
-iptables -P OUTPUT ACCEPT
 
-# CRITICAL: Bind mount entire /dev recursively to get real device nodes
-mkdir -p "$MATRIX/dev"
-mount --rbind /dev "$MATRIX/dev"
+iptables -F 2>/dev/null || true
+iptables -P INPUT ACCEPT 2>/dev/null || true
+iptables -P FORWARD ACCEPT 2>/dev/null || true
+iptables -P OUTPUT ACCEPT 2>/dev/null || true
 
-# Also bind mount /proc and /sys
-mkdir -p "$MATRIX/proc"
-mount --bind /proc "$MATRIX/proc"
-mkdir -p "$MATRIX/sys"
-mount --bind /sys "$MATRIX/sys"
+mkdir -p "$MATRIX/dev" "$MATRIX/proc" "$MATRIX/sys" "$MATRIX/tmp"
 
-# Mount /tmp as tmpfs
-mount -t tmpfs tmpfs "$MATRIX/tmp"
+is_mounted "$MATRIX/dev"  || mount --rbind /dev "$MATRIX/dev"
+is_mounted "$MATRIX/proc" || mount --bind /proc "$MATRIX/proc"
+is_mounted "$MATRIX/sys"  || mount --bind /sys "$MATRIX/sys"
+is_mounted "$MATRIX/tmp"  || mount -t tmpfs tmpfs "$MATRIX/tmp"
 
-# Copy resolv.conf for networking
-cp /etc/resolv.conf "$MATRIX/etc/resolv.conf" 2>/dev/null
+mkdir -p /tmp/matrix-flash
+mkdir -p "$MATRIX/tmp/matrix-flash"
+mount --bind /tmp/matrix-flash "$MATRIX/tmp/matrix-flash"
 
-echo "[OK] Environment prepared with real device nodes"
+# OpenWrt expects /var -> /tmp
+rm -rf "$MATRIX/var"
+ln -s /tmp "$MATRIX/var"
 
-echo " Launching OpenWrt Services..."
+mkdir -p \
+	"$MATRIX/tmp/run" \
+	"$MATRIX/tmp/run/ubus" \
+	"$MATRIX/tmp/log" \
+	"$MATRIX/tmp/lock" \
+	"$MATRIX/tmp/state" \
+	"$MATRIX/tmp/etc" \
+	"$MATRIX/tmp/sysinfo" \
+	"$MATRIX/tmp/lib/luci-bwc"
+
+mkdir -p "$MATRIX/etc/config"
+
+touch "$MATRIX/etc/config/network"
+touch "$MATRIX/etc/config/system"
+
+echo "zyxel,ex5601-t0-stock" > "$MATRIX/tmp/sysinfo/board_name"
+echo "Zyxel EX5601-T0 (Stock Layout)" > "$MATRIX/tmp/sysinfo/model"
+
+cp /etc/resolv.conf "$MATRIX/etc/resolv.conf" 2>/dev/null || true
+
+echo "[OK] Environment prepared with real device nodes."
+
+echo " Starting Matrix flash runner..."
+
+if [ -f "$FLASH_DIR/runner.pid" ]; then
+	OLDPID="$(cat "$FLASH_DIR/runner.pid" 2>/dev/null || true)"
+	if [ -n "$OLDPID" ] && kill -0 "$OLDPID" 2>/dev/null; then
+		echo "[OK] Matrix flash runner already running."
+	else
+		rm -f "$FLASH_DIR/runner.pid"
+	fi
+fi
+
+if [ ! -f "$FLASH_DIR/runner.pid" ]; then
+	/tmp/matrix_flash_runner.sh > "$FLASH_DIR/runner.log" 2>&1 &
+	echo $! > "$FLASH_DIR/runner.pid"
+	echo "[OK] Matrix flash runner started."
+fi
+
+echo " Launching OpenWrt LuCI services..."
 
 chroot "$MATRIX" /bin/sh <<'EOF'
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -92,14 +149,28 @@ sleep 2
 /sbin/procd &
 
 echo "------------------------------------------------"
-echo " SUCCESS: Access LUCI at:"
-echo " URL:     http://192.168.1.1:8080"
+echo " SUCCESS: Access LUCI at PORT 8080"
+echo " Example URL:     http://192.168.1.1:8080"
 echo "------------------------------------------------"
-echo " Ready"
-echo ""
-echo "NOTE: Flash commands will now work because /dev is properly bind-mounted"
+echo " Ready! This mod is written by"
+echo "Qureshi majad at lut.fi"
 echo "------------------------------------------------"
-
-# Keep the shell alive
-/bin/sh
 EOF
+
+chroot "$MATRIX" /sbin/ubusd > "$MATRIX/tmp/ubusd.log" 2>&1 &
+UBUSD_PID=$!
+
+sleep 1
+
+chroot "$MATRIX" /sbin/rpcd > "$MATRIX/tmp/rpcd.log" 2>&1 &
+RPCD_PID=$!
+
+sleep 1
+
+chroot "$MATRIX" /usr/sbin/uhttpd -f -p 0.0.0.0:8080 -h /www -r Matrix-OpenWrt > "$MATRIX/tmp/uhttpd.log" 2>&1 &
+UHTTPD_PID=$!
+
+sleep 2
+
+
+exit 0

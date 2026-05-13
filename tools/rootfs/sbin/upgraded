@@ -1,6 +1,0 @@
-#!/bin/sh
-# Fake upgraded binary to bypass PID 1 and UBUS checks
-echo "upgraded: Bypassing PID 1 check..."
-exit 0
-
-

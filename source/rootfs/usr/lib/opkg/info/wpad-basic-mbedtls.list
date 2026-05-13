@@ -1,0 +1,5 @@
+/usr/sbin/wpad
+/usr/sbin/hostapd
+/usr/share/hostap/wpa_supplicant.uc
+/usr/share/hostap/hostapd.uc
+/usr/sbin/wpa_supplicant

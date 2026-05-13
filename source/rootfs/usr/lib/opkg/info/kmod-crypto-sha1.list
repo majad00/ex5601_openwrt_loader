@@ -1,0 +1,3 @@
+/lib/modules/6.6.93/sha1_generic.ko
+/etc/modules.d/09-crypto-sha1
+/lib/modules/6.6.93/sha1-ce.ko

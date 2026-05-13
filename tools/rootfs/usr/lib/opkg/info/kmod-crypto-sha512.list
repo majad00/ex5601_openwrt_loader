@@ -1,2 +1,0 @@
-/etc/modules.d/09-crypto-sha512
-/lib/modules/6.6.93/sha512-arm64.ko

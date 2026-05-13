@@ -1,0 +1,33 @@
+{
+	"admin/status": {
+		"depends": {
+			"fs": {
+				"/nonexistent": "directory"
+			}
+		}
+	},
+
+	"admin/network": {
+		"depends": {
+			"fs": {
+				"/nonexistent": "directory"
+			}
+		}
+	},
+
+	"admin/vpn": {
+		"depends": {
+			"fs": {
+				"/nonexistent": "directory"
+			}
+		}
+	},
+
+	"admin/statistics": {
+		"depends": {
+			"fs": {
+				"/nonexistent": "directory"
+			}
+		}
+	}
+}

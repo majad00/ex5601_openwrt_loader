@@ -1,0 +1,13 @@
+Package: luci-proto-ipv6
+Version: 25.168.50434~d6b13f6
+Depends: libc
+Source: feeds/luci/protocols/luci-proto-ipv6
+SourceName: luci-proto-ipv6
+License: Apache-2.0
+Section: luci
+SourceDateEpoch: 1750168834
+URL: https://github.com/openwrt/luci
+Maintainer: OpenWrt LuCI community
+Architecture: all
+Installed-Size: 30720
+Description:  Support for DHCPv6/6in4/6to4/6rd/DS-Lite/IPIP6

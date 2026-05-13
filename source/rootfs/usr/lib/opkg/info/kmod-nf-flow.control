@@ -1,0 +1,12 @@
+Package: kmod-nf-flow
+Version: 6.6.93-r1
+Depends: kernel (=6.6.93~6a9e125268c43e0bae8cecb014c8ab03-r1), kmod-nf-conntrack
+Source: feeds/base/kernel/linux
+SourceName: kernel
+License: GPL-2.0-only
+LicenseFiles: COPYING
+Section: kernel
+SourceDateEpoch: 1749729063
+Architecture: aarch64_cortex-a53
+Installed-Size: 51200
+Description:  Netfilter flowtable support

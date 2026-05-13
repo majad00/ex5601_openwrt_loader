@@ -1,0 +1,3 @@
+/etc/config/ubootenv
+/etc/fw_env.config
+/etc/fw_sys.config

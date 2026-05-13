@@ -1,0 +1,14 @@
+{
+		"admin/system/matrix": {
+					"title": "Matrix Installer",
+							"order": 90,
+									"action": {
+													"type": "view",
+																"path": "matrix/flash"
+																		},
+																				"depends": {
+																								"acl": [ "luci-app-matrix" ]
+																										}
+																											}
+}
+

@@ -1,2 +1,0 @@
-/etc/modules.d/90-crypto-hw-safexcel
-/lib/modules/6.6.93/crypto_safexcel.ko
