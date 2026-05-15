@@ -1,10 +1,8 @@
-# OpenWrt Loader for Zyxel EX5601-T0
+# OpenWrt Installer for Zyxel EX5601-T0
 
-This repository provides tools and instructions for installing OpenWrt on the Zyxel EX5601-T0 router from the original Zyxel/OEM firmware.
-
-The installer does **not** require opening the router or using UART. It runs from the OEM firmware, starts a temporary OpenWrt/LuCI environment in RAM, and flashes OpenWrt to the inactive firmware slot.
-
-
+This repository offers a tool for installing OpenWrt on the Zyxel EX5601-T0 router that runs the OEM Zyxel firmware.
+The installation process works directly from the OEM firmware, without the need for a UART connection. All you need is a single tar file and a script loaded into the /tmp directory.
+## With the latest update, now it is possible to flash OpenWrt U-Boot Or Stock layout safely.
 
 > [!WARNING]
 > This tool is designed to reduce the risk of bricking by flashing the inactive slot, but Power loss during flash can brick the device.
@@ -36,7 +34,7 @@ chmod +x /tmp/loader.sh
 ```
 
 Once the script completes, LUCI web server will be running in your RAM at port 8080. 
-Flash Openwrt from LUCI menu ... System > Install matrix > and click on flash Openwrt button
+Flash Openwrt from LUCI menu ... System > Install matrix > and select to flash Openwrt-stock layout or U-boot layout.
 ### Router reboot at the end , usually it take 10 to 15 seconds for full installation.
 
 ## Expert's Guide
@@ -44,11 +42,9 @@ This bundle provides a safe way to install OpenWrt on the Zyxel EX5601-T0 router
 
 - **`loader.sh`** - A script that creates a Matrix/OpenWrt chroot environment on your running OEM firmware, similar to the second phase of sysupgrade. Instead of immediately flashing, it sets up additional services and the LuCI web interface to help you activate OpenWrt from within the OEM firmware at port 8080.
 
-- **`openwrt_chroot_rootfs.tar.gz`** - A pre-configured OpenWrt rootfs with minimal services enabled.
+- **`openwrt_chroot_rootfs.tar.gz`** - OpenWrt rootfs with minimal services enabled.
 
-> **Current Support**: Only OpenWrt firmware designed for the **stock OEM partition layout** can be flashed.
->
-> **Work in Progress**: Future updates will add support for flashing `ubootmod`-based OpenWrt firmware directly through the LuCI interface.
+> **Update**: With the latest update, now it is also possible to flash OpenWrt U-Boot layout safely.
 
 ---
 
@@ -92,22 +88,7 @@ cd ../rootfs
 tar -cpzf ../openwrt_chroot_rootfs.tar.gz . ; cd ..
 ```  
 
-## Current status
-The current installer supports the **stock OEM partition layout**.
 
-- Fully Open source as all codes are available, build your own bundle
-- No-UART require, safe flashing on inactive bank
-- Support all Openwrt versions design for stock-layout
-- Automatic handling of `ubi` / `ubi2` slot selection
-- Error handling on each step
-
-Not yet supported:
-
-- OpenWrt `ubootmod` layout conversion
-- Restoring OEM from OpenWrt
-
-Work in progress:
-
-- U-Boot MOD layout conversion from the Matrix LuCI interface
+Latest update: U-bootmod layout conversion from the Matrix LuCI interface is possible now
 
 

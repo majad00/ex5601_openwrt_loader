@@ -3,9 +3,15 @@
 'require rpc';
 'require ui';
 
-var callStart = rpc.declare({
+var callStartStock = rpc.declare({
 	object: 'matrix',
 	method: 'start',
+	expect: { }
+});
+
+var callStartUbootmod = rpc.declare({
+	object: 'matrix',
+	method: 'start_ubootmod',
 	expect: { }
 });
 
@@ -26,32 +32,71 @@ return view.extend({
 			'style': 'background:#111;color:#eee;padding:12px;min-height:320px;white-space:pre-wrap;overflow:auto'
 		}, [ data.log || 'No status yet.' ]);
 
-		var button = E('button', {
-			'class': 'cbi-button cbi-button-apply'
-		}, [ _('Flash OpenWrt') ]);
+		var stockButton = E('button', {
+			'class': 'cbi-button cbi-button-apply',
+			'style': 'margin-right:12px'
+		}, [ _('Flash OpenWrt-Stock Layout') ]);
 
-		button.addEventListener('click', function(ev) {
-			ev.preventDefault();
+		var ubootmodButton = E('button', {
+			'class': 'cbi-button cbi-button-negative'
+		}, [ _('Flash OpenWrt-Uboot Layout') ]);
 
-			if (!window.confirm(_('Flash OpenWrt to the inactive slot and reboot? Do not power off the router.')))
+		function startFlash(button, normalText, rpcCall, confirmText) {
+			if (!window.confirm(confirmText))
 				return;
 
 			button.disabled = true;
 			button.textContent = _('Starting...');
 
-			callStart().then(function(res) {
-				if (!res || res.ok !== true)
-					ui.addNotification(null, E('p', {}, [ res && res.message ? res.message : _('Failed to start flash') ]), 'danger');
-				else
-					ui.addNotification(null, E('p', {}, [ res.message || _('Flash started') ]), 'info');
+			rpcCall().then(function(res) {
+				if (!res || res.ok !== true) {
+					ui.addNotification(null,
+						E('p', {}, [ res && res.message ? res.message : _('Failed to start flash') ]),
+						'danger'
+					);
+				}
+				else {
+					ui.addNotification(null,
+						E('p', {}, [ res.message || _('Flash started') ]),
+						'info'
+					);
+				}
 
-				button.textContent = _('Flash OpenWrt');
+				button.textContent = normalText;
 				button.disabled = false;
+				updateLog();
 			}).catch(function(err) {
-				ui.addNotification(null, E('p', {}, [ _('RPC error: ') + err ]), 'danger');
-				button.textContent = _('Flash OpenWrt');
+				ui.addNotification(null,
+					E('p', {}, [ _('RPC error: ') + err ]),
+					'danger'
+				);
+
+				button.textContent = normalText;
 				button.disabled = false;
+				updateLog();
 			});
+		}
+
+		stockButton.addEventListener('click', function(ev) {
+			ev.preventDefault();
+
+			startFlash(
+				stockButton,
+				_('Flash OpenWrt-Stock Layout'),
+				callStartStock,
+				_('Flash OpenWrt stock layout and reboot? Do not power off the router.')
+			);
+		});
+
+		ubootmodButton.addEventListener('click', function(ev) {
+			ev.preventDefault();
+
+			startFlash(
+				ubootmodButton,
+				_('Flash OpenWrt-Uboot Layout'),
+				callStartUbootmod,
+				_('This will boot a temporary initramfs installer for OpenWrt U-Boot layout preparation. This is experimental. Continue?')
+			);
 		});
 
 		function updateLog() {
@@ -70,10 +115,24 @@ return view.extend({
 
 			E('div', { 'class': 'alert-message warning' }, [
 				E('strong', {}, [ _('Warning: ') ]),
-				_('This will flash OpenWrt to the inactive firmware slot and reboot the router. Do not power off the device.')
+				_('Do not power off the router while flashing or staging an installer.')
 			]),
 
-			E('p', {}, [ button ]),
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, [ _('Stock layout installation') ]),
+				E('p', {}, [
+					_('Installs OpenWrt using the original Zyxel dual-bank stock layout. This is the recommended and tested option.')
+				]),
+				E('p', {}, [ stockButton ])
+			]),
+
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, [ _('U-Boot layout installer') ]),
+				E('p', {}, [
+					_('Stages a temporary initramfs installer for the OpenWrt U-Boot layout. This does not directly use the normal stock-layout flash path.')
+				]),
+				E('p', {}, [ ubootmodButton ])
+			]),
 
 			E('h3', {}, [ _('Status') ]),
 			logBox

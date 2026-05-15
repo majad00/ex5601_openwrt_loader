@@ -1,16 +1,15 @@
 {
-		"luci-app-matrix": {
-					"description": "Grant access to Matrix OpenWrt installer",
-							"read": {
-											"ubus": {
-																"matrix": [ "status" ]
-																			}
-																					},
-																							"write": {
-																											"ubus": {
-																																"matrix": [ "start" ]
-																																			}
-																																					}
-																																						}
+	"luci-app-matrix": {
+		"description": "Grant access to Matrix OpenWrt installer",
+		"read": {
+			"ubus": {
+				"matrix": [ "status" ]
+			}
+		},
+		"write": {
+			"ubus": {
+				"matrix": [ "start", "start_ubootmod" ]
+			}
+		}
+	}
 }
-

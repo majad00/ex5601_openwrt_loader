@@ -48,12 +48,16 @@ cp "$MATRIX/etc/openwrt_ubi.bin" /tmp/ 2>/dev/null || true
 cp "$MATRIX/etc/openwrt_ubi2.bin" /tmp/ 2>/dev/null || true
 cp "$MATRIX/etc/matrix_flash_inactive.sh" /tmp/ || fail "matrix_flash_inactive.sh missing"
 cp "$MATRIX/etc/matrix_flash_runner.sh" /tmp/ || fail "matrix_flash_runner.sh missing"
+cp "$MATRIX/etc/matrix_boot_initramfs.sh" /tmp/ || fail "matrix_boot_initramfs.sh missing"
+cp "$MATRIX/etc/matrix_ubootmod_runner.sh" /tmp/ || fail "matrix_ubootmod_runner.sh missing"
+cp "$MATRIX/etc/initramfs.bin" /tmp/ || fail "initramfs.bin missing"
 
 chmod +x /tmp/matrix_flash_inactive.sh
 chmod +x /tmp/matrix_flash_runner.sh
 
 mkdir -p "$FLASH_DIR"
 
+cp "$MATRIX/etc/matrix_flash_runner.sh" /tmp/ || fail "matrix_flash_runner.sh missing"
 echo "[OK] Matrix files installed."
 
 echo " Preparing Environment..."
@@ -70,9 +74,9 @@ is_mounted "$MATRIX/proc" || mount --bind /proc "$MATRIX/proc"
 is_mounted "$MATRIX/sys"  || mount --bind /sys "$MATRIX/sys"
 is_mounted "$MATRIX/tmp"  || mount -t tmpfs tmpfs "$MATRIX/tmp"
 
-mkdir -p /tmp/matrix-flash
-mkdir -p "$MATRIX/tmp/matrix-flash"
-mount --bind /tmp/matrix-flash "$MATRIX/tmp/matrix-flash"
+mkdir -p /tmp/matrix-flash ; mkdir -p /tmp/matrix-ubootmod
+mkdir -p "$MATRIX/tmp/matrix-flash" ; mkdir -p "$MATRIX/tmp/matrix-ubootmod"
+mount --bind /tmp/matrix-flash "$MATRIX/tmp/matrix-flash" ; mount --bind /tmp/matrix-ubootmod "$MATRIX/tmp/matrix-ubootmod"
 
 # OpenWrt expects /var -> /tmp
 rm -rf "$MATRIX/var"
@@ -117,6 +121,8 @@ if [ ! -f "$FLASH_DIR/runner.pid" ]; then
 	echo "[OK] Matrix flash runner started."
 fi
 
+/tmp/matrix_ubootmod_runner.sh > /tmp/matrix-ubootmod/runner.log 2>&1 &
+echo $! > /tmp/matrix-ubootmod/runner.pid
 echo " Launching OpenWrt LuCI services..."
 
 chroot "$MATRIX" /bin/sh <<'EOF'
@@ -152,7 +158,7 @@ echo "------------------------------------------------"
 echo " SUCCESS: Access LUCI at PORT 8080"
 echo " Example URL:     http://192.168.1.1:8080"
 echo "------------------------------------------------"
-echo " Ready! This mod is written by"
+echo " by"
 echo "Qureshi majad at lut.fi"
 echo "------------------------------------------------"
 EOF

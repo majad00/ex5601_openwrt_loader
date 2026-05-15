@@ -1,4 +1,5 @@
 #!/bin/sh
+# written by majad qureshi at lut .fi
 
 DIR="/tmp/matrix-flash"
 REQ="$DIR/request"
