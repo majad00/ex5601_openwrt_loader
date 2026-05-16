@@ -95,7 +95,7 @@ return view.extend({
 				ubootmodButton,
 				_('Flash OpenWrt-Uboot Layout'),
 				callStartUbootmod,
-				_('This will boot a temporary initramfs installer for OpenWrt U-Boot layout preparation. This is experimental. Continue?')
+				_('This will reboot for OpenWrt U-Boot flashing in inintramfs, and can take about two min. Continue?')
 			);
 		});
 
@@ -121,7 +121,7 @@ return view.extend({
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, [ _('Stock layout installation') ]),
 				E('p', {}, [
-					_('Installs OpenWrt using the original Zyxel dual-bank stock layout. This is the recommended and tested option.')
+					_('Installs OpenWrt using the original Zyxel dual-bank stock layout.')
 				]),
 				E('p', {}, [ stockButton ])
 			]),
@@ -129,7 +129,7 @@ return view.extend({
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, [ _('U-Boot layout installer') ]),
 				E('p', {}, [
-					_('Stages a temporary initramfs installer for the OpenWrt U-Boot layout. This does not directly use the normal stock-layout flash path.')
+					_('Stages a temporary initramfs installer for the OpenWrt U-Boot layout installation.')
 				]),
 				E('p', {}, [ ubootmodButton ])
 			]),

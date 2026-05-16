@@ -41,8 +41,8 @@ while true; do
 
 			"$STAGER"
 
-			echo "Stager exited unexpectedly."
-			echo "If staging succeeded, router should have rebooted."
+			echo "Stager exited ."
+			echo "staging ends, router work in initramfs with auto scripting give it a min or two."
 		} >> "$LOG" 2>&1
 
 		rm -f "$RUNNING"

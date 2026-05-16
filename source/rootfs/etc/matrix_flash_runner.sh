@@ -36,8 +36,8 @@ while true; do
 
 			"$FLASH"
 
-			echo "Flash script exited unexpectedly."
-			echo "If flashing succeeded, router should have rebooted."
+			echo "Flash script exited."
+			echo "flashing ends, router will reboot now get back at 192.168.1.1 "
 		} >> "$LOG" 2>&1
 
 		rm -f "$RUNNING"

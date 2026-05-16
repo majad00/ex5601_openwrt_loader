@@ -135,15 +135,13 @@ mkdir -p /var/run /var/log /var/lock /var/state /tmp/etc /tmp/sysinfo /var/lib/l
 # Create symlinks for /var
 rm -f /var
 ln -s /tmp /var
-
 # Create board info
 echo "zyxel,ex5601-t0-stock" > /tmp/sysinfo/board_name
 echo "Zyxel EX5601-T0 (Stock Layout)" > /tmp/sysinfo/model
-
 # Ensure config directories exist
 mkdir -p /etc/config
 touch /etc/config/network /etc/config/system
-
+echo "Matrix Loader" > /etc/config/system
 # Start services in background
 /sbin/ubusd &
 sleep 2
@@ -157,24 +155,15 @@ sleep 2
 echo "------------------------------------------------"
 echo " SUCCESS: Access LUCI at PORT 8080"
 echo " Example URL:     http://192.168.1.1:8080"
-echo "------------------------------------------------"
-echo " by"
-echo "Qureshi majad at lut.fi"
+echo " Username:	 root / no password"
 echo "------------------------------------------------"
 EOF
 
-chroot "$MATRIX" /sbin/ubusd > "$MATRIX/tmp/ubusd.log" 2>&1 &
-UBUSD_PID=$!
+#chroot "$MATRIX" /sbin/ubusd > "$MATRIX/tmp/ubusd.log" 2>&1 & UBUSD_PID=$!
 
-sleep 1
+#chroot "$MATRIX" /sbin/rpcd > "$MATRIX/tmp/rpcd.log" 2>&1 & RPCD_PID=$!
 
-chroot "$MATRIX" /sbin/rpcd > "$MATRIX/tmp/rpcd.log" 2>&1 &
-RPCD_PID=$!
-
-sleep 1
-
-chroot "$MATRIX" /usr/sbin/uhttpd -f -p 0.0.0.0:8080 -h /www -r Matrix-OpenWrt > "$MATRIX/tmp/uhttpd.log" 2>&1 &
-UHTTPD_PID=$!
+chroot "$MATRIX" /usr/sbin/uhttpd -f -p 0.0.0.0:8080 -h /www -r Matrix-OpenWrt > "$MATRIX/tmp/uhttpd.log" 2>&1 & UHTTPD_PID=$!
 
 sleep 2
 

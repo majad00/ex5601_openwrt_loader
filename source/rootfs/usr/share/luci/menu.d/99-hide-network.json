@@ -1,0 +1,10 @@
+{
+    "admin/network": {
+        "title": "Network",
+        "order": 30,
+        "action": { "type": "firstchild" },
+        "readonly": true,
+        "hidden": true
+    }
+}
+
