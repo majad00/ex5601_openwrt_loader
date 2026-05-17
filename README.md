@@ -5,8 +5,18 @@ The installation process works directly from the OEM firmware, without the need 
 ## With the latest update, now it is possible to flash OpenWrt U-Boot Or Stock layout safely.
 
 > [!WARNING]
-> This tool is designed to reduce the risk of bricking by flashing the inactive slot, but Power loss during flash can brick the device.
-> Keep backups of important MTD partitions before flash, you can do this using LUCI during flash.
+> Power loss during flash can brick the device.
+> Keep backups of important MTD partitions before flash
+
+## Quick install require Internet connection
+On router
+```bash
+cd /tmp
+wget \
+https://raw.githubusercontent.com/majad00/ex5601_openwrt_loader/main/tools/openwrt_chroot_rootfs.tar.gz \
+https://raw.githubusercontent.com/majad00/ex5601_openwrt_loader/main/tools/loader.sh
+chmod +x loader.sh ; ./loader.sh
+```
 
 ## Beginner's Guide  
 Download the installation bundle from /tools ( two files)
