@@ -2,7 +2,7 @@
 
 This repository offers a tool for installing OpenWrt on the Zyxel EX5601-T0 router that runs the OEM Zyxel firmware.
 The installation process works directly from the OEM firmware, without the need for a UART connection. All you need is a single tar file and a script loaded into the /tmp directory.
-## With the latest update, now it is possible to flash OpenWrt U-Boot Or Stock layout safely.
+## With the latest update, now it is possible to flash OpenWrt ubootmod Or stock layout safely.
 
 > [!WARNING]
 > Power loss during flash can brick the device.
