@@ -129,7 +129,7 @@ return view.extend({
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, [ _('U-Boot layout installer') ]),
 				E('p', {}, [
-					_('Stages a temporary initramfs installer for the OpenWrt U-Boot layout installation.')
+					_('Stages a initramfs installer for flashing, please connect 192.168.1.1 after two min ( NO POWER OFF).')
 				]),
 				E('p', {}, [ ubootmodButton ])
 			]),
