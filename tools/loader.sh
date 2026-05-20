@@ -16,9 +16,6 @@ is_mounted() {
 	grep -q " $1 " /proc/mounts
 }
 
-echo "================================================"
-echo "      Zyxel EX5601-T0 OpenWrt Matrix Loader"
-echo "================================================"
 
 echo -n "Starting > > " > /dev/console
 for i in 1 2; do
@@ -151,7 +148,9 @@ sleep 2
 sleep 2
 /usr/sbin/uhttpd -f -p 8080 -h /www -r Matrix-OpenWrt &
 /sbin/procd &
-
+echo "================================================"
+echo "      EX5601-T0 OpenWrt Installer"
+echo "================================================"
 echo "------------------------------------------------"
 echo " SUCCESS: Access LUCI at PORT 8080"
 echo " Example URL:     http://192.168.1.1:8080"
