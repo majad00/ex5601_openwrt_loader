@@ -17,12 +17,24 @@ need_cmd() {
 
 mtd_num_by_name() {
 	local name="$1"
-	awk -v n="\"$name\"" '$4 == n {
-		gsub(/^mtd/, "", $1);
-		gsub(/:$/, "", $1);
-		print $1;
-		exit;
-	}' /proc/mtd
+
+	awk -v want="$name" '
+		BEGIN {
+			want = tolower(want)
+		}
+
+		/^mtd[0-9]+:/ {
+			name = $4
+			gsub(/"/, "", name)
+
+			if (tolower(name) == want) {
+				gsub(/^mtd/, "", $1)
+				gsub(/:$/, "", $1)
+				print $1
+				exit
+			}
+		}
+	' /proc/mtd
 }
 
 find_ubi_by_mtdnum() {
