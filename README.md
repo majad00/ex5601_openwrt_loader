@@ -1,8 +1,8 @@
 # OpenWrt Installer for Zyxel EX5601-T0
 
-This tool install OpenWrt on the Zyxel EX5601-T0 without UART connection.
+**This tool install OpenWrt on the Zyxel EX5601-T0 without UART connection.**
 The installation process works directly from the OEM firmware, all you need is a single tar file and a script loaded into the /tmp directory.
-## With the latest update, now it is possible to flash OpenWrt ubootmod Or stock layout safely.
+### With the latest update, now it is possible to flash OpenWrt ubootmod Or stock layout safely.
 
 > [!WARNING]
 > Power loss during flash can brick the device.
