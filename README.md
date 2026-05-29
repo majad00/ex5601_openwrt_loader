@@ -23,7 +23,7 @@ chmod +x loader.sh ; ./loader.sh
 1) Miniroot Archive (openwrt_chroot_rootfs.tar.gz)
 2) Main script (loader.sh ) 
 
-> Copy both files to the router's /tmp dir using WinSCP or the SCP:
+> UNZIP ant copy both files to the router's /tmp dir using WinSCP or the SCP:
 
 ```bash
 scp openwrt_chroot_rootfs.tar.gz loader.sh root@192.168.1.1:/tmp/
