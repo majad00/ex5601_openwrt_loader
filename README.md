@@ -1,13 +1,13 @@
 # OpenWrt Installer for Zyxel EX5601-T0
 
 **This tool install OpenWrt on the Zyxel EX5601 / T56 without UART connection.**
-The installation process works directly from the OEM firmware, all you need is a single tar file and a script loaded into the /tmp directory.
+The installation works from the SSH on OEM firmware, all you need is a single tar file and a script loaded into the /tmp directory.
 
 > [!WARNING]
 > Power loss during flash can brick the device.
 > Keep backups of important MTD partitions before flash
 
-## Quick Install
+## Online Install
 Make sure internet connection is working on router, then use these commands, head to LUCI at port 8080 to finish installation 
 ```bash
 cd /tmp
@@ -28,11 +28,12 @@ chmod +x loader.sh ; ./loader.sh
 ```bash
 scp openwrt_chroot_rootfs.tar.gz loader.sh root@192.168.1.1:/tmp/
 ```
-Alternatively, you can copy files to a USB drive and then use the USB drive 
+Alternatively, you can copy files to a USB drive and then use the USB drive to copy both files to /tmp
 
 ```bash
 mount /dev/sda1 /mnt/usb
 cp /mnt/usb/openwrt_chroot_rootfs.tar.gz /tmp
+cp /mnt/usb/loader.sh /tmp
 
 ```
 > Starting
