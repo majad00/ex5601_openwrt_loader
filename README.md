@@ -46,7 +46,7 @@ chmod +x /tmp/loader.sh
 
 Once the script completes, LUCI web server will be running in your RAM at port 8080. 
 Flash Openwrt from LUCI menu ... System > Install matrix > and select to flash Openwrt-stock layout or U-boot layout.
-### Router reboot at the end , usually it take 10 to 15 seconds for full installation.
+### Router reboot at the end , usually it take 30 to 50 seconds for full installation.
 
 ## Expert's Guide
 This bundle provides a safe way to install OpenWrt on the Zyxel EX5601-T0 router directly from the OEM firmware flashing inactive partition, how we do that.
