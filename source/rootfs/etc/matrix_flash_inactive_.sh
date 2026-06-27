@@ -1,7 +1,5 @@
 #!/bin/sh
 #written by majad.qureshi at lut.fi
-# UNIVERSAL VERSION - Works on both firmware 4.1 and newer versions
-
 set -eu
 
 FW_ARG="${1:-}"
@@ -114,12 +112,8 @@ need_cmd ubirmvol
 need_cmd ubiupdatevol
 need_cmd wc
 need_cmd sync
-need_cmd fw_setenv
-need_cmd fw_printenv
-need_cmd sys
-need_cmd ubus
 
-echo "Matrix EX5601-T0 inactive-slot installer (UNIVERSAL)"
+echo "Matrix EX5601-T0 inactive-slot installer"
 
 [ "$(id -u)" = "0" ] || fail "must run as root"
 
@@ -239,7 +233,7 @@ echo "Writing firmware"
 ubiupdatevol "${TARGET_UBI}_0" "$KERNEL" >/dev/null
 ubiupdatevol "${TARGET_UBI}_1" "$ROOT" >/dev/null
 
-echo "Updating boot metadata (legacy method for firmware 4.1)"
+echo "Updating boot metadata"
 
 dd if="${ACTIVE_UBI}_2" of=/tmp/matrix_zyfwinfo.bin bs=256 count=1 >/dev/null 2>&1 || fail "could not read active zyfwinfo"
 
@@ -262,83 +256,9 @@ ubiupdatevol "${TARGET_UBI}_2" /tmp/matrix_zyfwinfo.bin >/dev/null
 dd if="${ACTIVE_UBI}_3" of=/tmp/matrix_zydefault.bin >/dev/null 2>&1 || fail "could not read active zydefault"
 ubiupdatevol "${TARGET_UBI}_3" /tmp/matrix_zydefault.bin >/dev/null
 
-echo "Setting boot switch (universal method)"
-
-# Try multiple methods to ensure boot switch works on all firmware versions
-
-echo "Attempting OEM boot switch via ubus..."
-JSON="{
-	\"prefix\": \"/tmp\",
-	\"path\": \"$FW\",
-	\"command\": \"/lib/upgrade/do_stage2\",
-	\"options\": {
-		\"save_partitions\": 1
-	}
-}"
-
-UBUS_SUCCESS=0
-if echo "$JSON" | ubus call system sysupgrade 2>/dev/null; then
-	UBUS_SUCCESS=1
-	echo "✅ OEM boot switch triggered via ubus"
-else
-	echo "⚠️  ubus call failed, falling back to manual methods"
-fi
-
-#  2: U-Boot bootpart (works on some firmware)
-if [ $UBUS_SUCCESS -eq 0 ]; then
-	CURRENT_BOOTPART="$(fw_printenv bootpart 2>/dev/null | cut -d= -f2)"
-	echo "Current bootpart=$CURRENT_BOOTPART"
-
-	if [ "$TARGET_NAME" = "ubi" ]; then
-		NEW_BOOTPART="1"
-	else
-		NEW_BOOTPART="0"
-	fi
-
-	echo "Setting bootpart=$NEW_BOOTPART (to boot from $TARGET_NAME)"
-	fw_setenv bootpart "$NEW_BOOTPART" || echo "Warning: Failed to set bootpart"
-	fw_setenv bootcount 0 2>/dev/null
-	echo "✅ bootpart set to $NEW_BOOTPART"
-fi
-
-#  3: sys atsw (logging/diagnostic - kept for compatibility)
-echo "Running sys atsw for compatibility..."
-sys atsw 2>/dev/null || true
-
-#  4: Update zyubi data volume if available (extra safety)
-echo "Checking zyubi data volume..."
-if find_ubi_by_mtdnum 8 >/dev/null 2>&1; then
-	ZYUBI_DEV="$(find_ubi_by_mtdnum 8)"
-	if [ -e "${ZYUBI_DEV}_3" ]; then
-		echo "Updating zyubi boot flags..."
-		mkdir -p /tmp/zyubi_mount
-		if mount -t ubifs "${ZYUBI_DEV}_3" /tmp/zyubi_mount 2>/dev/null; then
-			# Update RebootCount to trigger boot from other bank
-			echo "999" > /tmp/zyubi_mount/RebootCount 2>/dev/null
-			echo "1" > /tmp/zyubi_mount/upgrade_available 2>/dev/null
-			echo "$TARGET_NAME" > /tmp/zyubi_mount/bootbank 2>/dev/null
-			sync
-			umount /tmp/zyubi_mount 2>/dev/null
-			echo "✅ zyubi boot flags updated"
-		fi
-		rmdir /tmp/zyubi_mount 2>/dev/null
-	fi
-fi
-
 sync
 sync
 
-echo ""
-echo "=============================================="
-echo "Flash complete.  switch set using:"
-echo "  - zyfwinfo sequence (firmware 4.1 compatible)"
-if [ $UBUS_SUCCESS -eq 1 ]; then
-	echo "  - ✅ OEM ubus sysupgrade (primary method)"
-else
-	echo "  - ⚠️  bootpart (fallback method)"
-fi
-echo "Target slot: $TARGET_NAME (mtd$TARGET_MTD)"
-echo "=============================================="
-echo "Rebooting in 3 seconds."
+echo "Flash complete. Rebooting."
 sleep 3
 reboot

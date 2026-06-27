@@ -1,8 +1,6 @@
 #!/bin/sh
-# Matrix EX5601-T0 ubootmod initramfs stager - UNIVERSAL VERSION
-# Works on both firmware 4.1 and newer versions
+# Matrix EX5601-T0 ubootmod initramfs stager
 # written by majad qureshi at lut .fi
-# Modified for universal boot switching
 
 set -u
 
@@ -159,7 +157,7 @@ trap cleanup EXIT
 
 mkdir "$LOCK" 2>/dev/null || fail "another initramfs staging process is running"
 
-say "=== Matrix EX5601-T0 initramfs stager (UNIVERSAL) ==="
+say "=== Matrix EX5601-T0 initramfs stager ==="
 
 say "[1] Checking commands"
 
@@ -180,9 +178,6 @@ need_cmd ubimkvol
 need_cmd ubinfo
 need_cmd ubiupdatevol
 need_cmd wc
-need_cmd fw_setenv
-need_cmd fw_printenv
-need_cmd sys
 
 say "[2] Checking image"
 
@@ -326,7 +321,7 @@ dd if=/dev/zero of="$WORK/empty-rootfs.bin" bs="$LEB_SIZE" count=1 >/dev/null 2>
 ubiupdatevol "${TARGET_UBI}_1" "$WORK/empty-rootfs.bin" >/dev/null || \
 	fail "could not write empty rootfs placeholder"
 
-say "[8] Updating zyfwinfo (legacy boot method for firmware 4.1)"
+say "[8] Updating zyfwinfo"
 
 cp "$WORK/zyfwinfo.active.bin" "$WORK/zyfwinfo.target.bin" || \
 	fail "could not copy zyfwinfo"
@@ -349,35 +344,18 @@ else
 		fail "could not write empty zydefault"
 fi
 
-say "[10] Setting boot switch (universal method)"
-
-# Get current bootpart
-CURRENT_BOOTPART="$(fw_printenv bootpart 2>/dev/null | cut -d= -f2)"
-say "Current bootpart=$CURRENT_BOOTPART"
-
-# Determine target bootpart
-if [ "$TARGET_NAME" = "ubi" ]; then
-	# Target is mtd6/ubi -> bootpart=1
-	NEW_BOOTPART="1"
-else
-	# Target is mtd7/ubi2 -> bootpart=0
-	NEW_BOOTPART="0"
-fi
-
-say "Setting bootpart=$NEW_BOOTPART (to boot from $TARGET_NAME)"
-fw_setenv bootpart "$NEW_BOOTPART" || say "Warning: Failed to set bootpart"
-sys atsw
-# Also set bootcount=0 for clean boot
-fw_setenv bootcount 0 2>/dev/null
-
-say "[11] Final sync"
+say "[10] Final sync"
 
 sync
 sync
 
 say "=============================================="
 say "STAGE COMPLETE"
-say "Wait for two minute before accessing your router at 192.168.1.1"
+say "Temporary initramfs FIT has been written."
+say "Target bank: mtd$TARGET_MTD / $TARGET_NAME"
+say "No ubootmod NAND conversion was done."
+say "No FIP was written."
+say "Log: $LOG"
 say "=============================================="
 
 say "Rebooting in 5 seconds..."
@@ -385,3 +363,4 @@ sleep 5
 reboot -f
 
 exit 0
+
