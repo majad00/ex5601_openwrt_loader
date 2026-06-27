@@ -12,6 +12,51 @@ fail() {
 	exit 1
 }
 
+
+# Function to check firmware version and warn about 3.x
+check_firmware_version() {
+	# Get firmware version using sys atsh
+	FW_VERSION="$(sys atsh 2>/dev/null | grep -i "Firmware Version" | awk -F':' '{print $2}' | sed 's/^[ \t]*//;s/[ \t]*$//')"
+	
+	if [ -n "$FW_VERSION" ]; then
+		# Extract major version (3, 4, 5, etc.)
+		MAJOR="$(echo "$FW_VERSION" | sed -n 's/.*ACDZ\.\([0-9]\)\.[0-9].*/\1/p')"
+		
+		if [ "$MAJOR" = "3" ]; then
+			echo ""
+			echo "=============================================="
+			echo "⚠️  WARNING: FIRMWARE VERSION 3.x DETECTED!"
+			echo "=============================================="
+			echo "Detected: $FW_VERSION"
+			echo ""
+			echo "The boot partition switching mechanism on firmware 3.x"
+			echo "is different from 4.x and 5.x versions."
+			echo ""
+			echo " THE TOOL CAN NOT WORK ON THIS DEVICE "
+			echo " you need to switch the boot partition manually at the end"
+			echo ""
+			echo "     fw_setenv bootpart 0   # or 1"
+			echo "     fw_setenv bootcount 0"
+			echo "     sys atsw OR zyxel sys atsh"
+			echo ""
+			echo "  Recommended way: flash router with firmware 4.x or 5.x"
+			echo "=============================================="
+			echo ""
+			echo "Press Enter to continue (tool may not work), or Ctrl+C to abort and flash router with right firmware..."
+			read -r
+		elif [ "$MAJOR" = "4" ]; then
+			echo "✅ Firmware 4.x detected - boot switching works automatically"
+		elif [ "$MAJOR" -ge 5 ] 2>/dev/null; then
+			echo "✅ Firmware 5.x or higher detected - boot switching works automatically"
+		else
+			echo "⚠️  Unknown firmware version: $FW_VERSION"
+		fi
+	else
+		echo "⚠️  Could not detect firmware version (sys atsh not available)"
+	fi
+}
+
+
 is_mounted() {
 	grep -q " $1 " /proc/mounts
 }
@@ -55,9 +100,13 @@ chmod +x /tmp/matrix_flash_runner.sh
 mkdir -p "$FLASH_DIR"
 
 cp "$MATRIX/etc/matrix_flash_runner.sh" /tmp/ || fail "matrix_flash_runner.sh missing"
+
 echo "[OK] Matrix files installed."
 
+check_firmware_version
+
 echo " Preparing Environment..."
+
 
 iptables -F 2>/dev/null || true
 iptables -P INPUT ACCEPT 2>/dev/null || true
@@ -141,8 +190,6 @@ touch /etc/config/network /etc/config/system
 echo "Matrix Loader" > /etc/config/system
 # Start services in background
 /sbin/ubusd &
-sleep 2
-/sbin/configd &
 sleep 2
 /sbin/rpcd &
 sleep 2

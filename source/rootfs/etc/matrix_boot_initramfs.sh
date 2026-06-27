@@ -2,7 +2,7 @@
 # Matrix EX5601-T0 ubootmod initramfs stager - UNIVERSAL VERSION
 # Works on both firmware 4.1 and newer versions
 # written by majad qureshi at lut .fi
-# Modified for universal boot switching
+# Modified for universal boot switching 
 
 set -u
 
