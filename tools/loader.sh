@@ -103,7 +103,7 @@ cp "$MATRIX/etc/matrix_flash_runner.sh" /tmp/ || fail "matrix_flash_runner.sh mi
 
 echo "[OK] Matrix files installed."
 
-check_firmware_version
+#check_firmware_version
 
 echo " Preparing Environment..."
 
