@@ -2,14 +2,15 @@
 # Matrix EX5601-T0 ubootmod initramfs stager - UNIVERSAL VERSION
 # Works on both firmware 4.1 and newer versions
 # written by majad qureshi at lut .fi
-# Modified for universal boot switching 
+# Modified for universal boot switching
 
 set -u
 
-INITRAMFS="/tmp/initramfs.bin"
-LOG="/tmp/matrix_boot_initramfs.log"
+INITRAMFS="${INITRAMFS:-/tmp/initramfs.bin}"
+LOG="${LOG:-/tmp/matrix_boot_initramfs.log}"
 WORK="/tmp/matrix-initramfs-stage"
 LOCK="/tmp/matrix-initramfs-stage.lock"
+NO_REBOOT="${NO_REBOOT:-0}"
 
 exec > "$LOG" 2>&1
 
@@ -29,12 +30,23 @@ need_cmd() {
 mtd_num_by_name() {
 	local name="$1"
 
-	awk -v n="\"$name\"" '$4 == n {
-		gsub(/^mtd/, "", $1);
-		gsub(/:$/, "", $1);
-		print $1;
-		exit;
-	}' /proc/mtd
+	awk -v want="$name" '
+		BEGIN {
+			want = tolower(want)
+		}
+
+		/^mtd[0-9]+:/ {
+			name = $4
+			gsub(/"/, "", name)
+
+			if (tolower(name) == want) {
+				gsub(/^mtd/, "", $1)
+				gsub(/:$/, "", $1)
+				print $1
+				exit
+			}
+		}
+	' /proc/mtd
 }
 
 find_ubi_by_mtdnum() {
@@ -43,10 +55,29 @@ find_ubi_by_mtdnum() {
 
 	for u in /sys/class/ubi/ubi[0-9]*; do
 		[ -f "$u/mtd_num" ] || continue
-		n="$(cat "$u/mtd_num")"
+		n="$(cat "$u/mtd_num" 2>/dev/null || true)"
 
 		if [ "$n" = "$want" ]; then
 			echo "/dev/$(basename "$u")"
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+ubi_vol_dev_by_name() {
+	local ubidev="$1"
+	local want="$2"
+	local base="${ubidev##*/}"
+	local p name
+
+	for p in /sys/class/ubi/"$base"_*; do
+		[ -f "$p/name" ] || continue
+		name="$(cat "$p/name" 2>/dev/null || true)"
+
+		if [ "$name" = "$want" ]; then
+			echo "/dev/$(basename "$p")"
 			return 0
 		fi
 	done
@@ -92,10 +123,14 @@ detach_mtd_if_attached() {
 get_leb_size() {
 	local ubidev="$1"
 	local base="${ubidev##*/}"
+	local leb=""
 
 	if [ -f "/sys/class/ubi/$base/usable_eb_size" ]; then
-		cat "/sys/class/ubi/$base/usable_eb_size"
-		return
+		leb="$(cat "/sys/class/ubi/$base/usable_eb_size" 2>/dev/null || true)"
+		if [ -n "$leb" ]; then
+			echo "$leb"
+			return 0
+		fi
 	fi
 
 	ubinfo "$ubidev" | awk -F: '/Logical eraseblock size/ {
@@ -113,18 +148,8 @@ round_up_leb_size() {
 	echo $(( ((size + leb - 1) / leb) * leb ))
 }
 
-read_u16_le() {
-	local file="$1"
-	local off="$2"
-	local lo hi
-
-	lo="$(dd if="$file" bs=1 skip="$off" count=1 2>/dev/null | hexdump -v -e '1/1 "%u"')"
-	hi="$(dd if="$file" bs=1 skip="$((off + 1))" count=1 2>/dev/null | hexdump -v -e '1/1 "%u"')"
-
-	[ -n "$lo" ] || lo=0
-	[ -n "$hi" ] || hi=0
-
-	echo $((lo + (hi * 256)))
+read_byte_dec() {
+	dd if="$1" bs=1 skip="$2" count=1 2>/dev/null | hexdump -v -e '1/1 "%u"'
 }
 
 write_byte() {
@@ -139,17 +164,81 @@ write_byte() {
 	printf "\\$oct" | dd of="$file" bs=1 seek="$off" conv=notrunc 2>/dev/null
 }
 
-write_u16_le() {
+calc_zyfwinfo_checksum() {
 	local file="$1"
-	local off="$2"
-	local val="$3"
+
+	dd if="$file" bs=1 count=254 2>/dev/null | \
+		hexdump -v -e '1/1 "%u\n"' | \
+		awk '{s += $1} END {print s % 65536}'
+}
+
+read_zyfwinfo_stored_checksum() {
+	local file="$1"
 	local lo hi
 
-	lo=$((val & 255))
-	hi=$(((val >> 8) & 255))
+	lo="$(read_byte_dec "$file" 254)"
+	hi="$(read_byte_dec "$file" 255)"
 
-	write_byte "$file" "$off" "$lo"
-	write_byte "$file" "$((off + 1))" "$hi"
+	echo $((lo + hi * 256))
+}
+
+write_zyfwinfo_checksum() {
+	local file="$1"
+	local checksum lo hi
+
+	checksum="$(calc_zyfwinfo_checksum "$file")"
+	lo=$((checksum & 255))
+	hi=$(((checksum >> 8) & 255))
+
+	write_byte "$file" 254 "$lo"
+	write_byte "$file" 255 "$hi"
+
+	echo "$checksum"
+}
+
+verify_zyfwinfo_file() {
+	local file="$1"
+	local expected_seq="$2"
+	local label="$3"
+	local seq calc stored
+
+	[ -f "$file" ] || fail "$label missing: $file"
+
+	seq="$(read_byte_dec "$file" 6)"
+	calc="$(calc_zyfwinfo_checksum "$file")"
+	stored="$(read_zyfwinfo_stored_checksum "$file")"
+
+	say "$label:"
+	hexdump -C "$file"
+	say "$label sequence: $seq"
+	say "$label checksum calculated: 0x$(printf '%04x' "$calc")"
+	say "$label checksum stored:     0x$(printf '%04x' "$stored")"
+
+	[ "$seq" = "$expected_seq" ] || fail "$label sequence mismatch: expected $expected_seq got $seq"
+	[ "$calc" = "$stored" ] || fail "$label checksum mismatch"
+}
+
+make_minimal_zyfwinfo() {
+	local file="$1"
+	local seq="$2"
+	local checksum
+
+	dd if=/dev/zero of="$file" bs=256 count=1 >/dev/null 2>&1 || \
+		fail "could not create minimal zyfwinfo"
+
+	# Magic: EXYZ
+	write_byte "$file" 0 69
+	write_byte "$file" 1 88
+	write_byte "$file" 2 89
+	write_byte "$file" 3 90
+
+	# Minimal OpenWrt-compatible fields.
+	write_byte "$file" 4 2
+	write_byte "$file" 6 "$seq"
+	write_byte "$file" 9 1
+
+	checksum="$(write_zyfwinfo_checksum "$file")"
+	echo "$checksum"
 }
 
 cleanup() {
@@ -159,7 +248,12 @@ trap cleanup EXIT
 
 mkdir "$LOCK" 2>/dev/null || fail "another initramfs staging process is running"
 
-say "=== Matrix EX5601-T0 initramfs stager (UNIVERSAL) ==="
+say "=== Matrix EX5601-T0 initramfs stager ==="
+say "Boot switch method: zyfwinfo sequence only"
+say "No sys atsw / no sys seqnum / no sys atsh"
+say "NO_REBOOT=$NO_REBOOT"
+say "INITRAMFS=$INITRAMFS"
+say "LOG=$LOG"
 
 say "[1] Checking commands"
 
@@ -180,9 +274,6 @@ need_cmd ubimkvol
 need_cmd ubinfo
 need_cmd ubiupdatevol
 need_cmd wc
-need_cmd fw_setenv
-need_cmd fw_printenv
-need_cmd sys
 
 say "[2] Checking image"
 
@@ -214,10 +305,10 @@ MTD_UBI="$(mtd_num_by_name ubi || true)"
 MTD_UBI2="$(mtd_num_by_name ubi2 || true)"
 MTD_ZYUBI="$(mtd_num_by_name zyubi || true)"
 
-[ "$MTD_PARENT" = "0" ] || fail "not OEM stock layout: expected mtd0 named spi0.1"
-[ "$MTD_UBI" = "6" ] || fail "not OEM stock layout: expected mtd6 named ubi"
-[ "$MTD_UBI2" = "7" ] || fail "not OEM stock layout: expected mtd7 named ubi2"
-[ "$MTD_ZYUBI" = "8" ] || fail "not OEM stock layout: expected mtd8 named zyubi"
+[ -n "$MTD_PARENT" ] || fail "not OEM stock layout: parent mtd named spi0.1 missing"
+[ -n "$MTD_UBI" ] || fail "not OEM stock layout: mtd named ubi missing"
+[ -n "$MTD_UBI2" ] || fail "not OEM stock layout: mtd named ubi2 missing"
+[ -n "$MTD_ZYUBI" ] || fail "not OEM stock layout: mtd named zyubi missing"
 
 CMDLINE="$(cat /proc/cmdline)"
 say "$CMDLINE"
@@ -241,6 +332,10 @@ esac
 [ "$TARGET_MTD" != "$MTD_ZYUBI" ] || fail "refusing to target zyubi"
 [ "$TARGET_MTD" != "$ACTIVE_MTD" ] || fail "target equals active bank"
 
+say "MTD_PARENT=mtd$MTD_PARENT"
+say "MTD_UBI=mtd$MTD_UBI"
+say "MTD_UBI2=mtd$MTD_UBI2"
+say "MTD_ZYUBI=mtd$MTD_ZYUBI"
 say "ACTIVE_MTD=mtd$ACTIVE_MTD"
 say "TARGET_MTD=mtd$TARGET_MTD"
 say "TARGET_NAME=$TARGET_NAME"
@@ -250,32 +345,37 @@ say "[4] Reading active metadata"
 ACTIVE_UBI="$(attach_mtd "$ACTIVE_MTD")"
 say "ACTIVE_UBI=$ACTIVE_UBI"
 
-[ -e "${ACTIVE_UBI}_2" ] || fail "active zyfwinfo volume missing: ${ACTIVE_UBI}_2"
+ACTIVE_ZYFW="$(ubi_vol_dev_by_name "$ACTIVE_UBI" zyfwinfo || true)"
+ACTIVE_ZYDEFAULT="$(ubi_vol_dev_by_name "$ACTIVE_UBI" zydefault || true)"
+
+[ -n "$ACTIVE_ZYFW" ] || fail "active zyfwinfo volume missing"
+say "ACTIVE_ZYFW=$ACTIVE_ZYFW"
 
 rm -rf "$WORK"
 mkdir -p "$WORK"
 
-dd if="${ACTIVE_UBI}_2" of="$WORK/zyfwinfo.active.bin" bs=256 count=1 >/dev/null 2>&1 || \
+dd if="$ACTIVE_ZYFW" of="$WORK/zyfwinfo.active.bin" bs=256 count=1 >/dev/null 2>&1 || \
 	fail "could not read active zyfwinfo"
 
-if [ -e "${ACTIVE_UBI}_3" ]; then
-	ACTIVE_LEB_SIZE="$(get_leb_size "$ACTIVE_UBI")"
-	dd if="${ACTIVE_UBI}_3" of="$WORK/zydefault.active.bin" bs="$ACTIVE_LEB_SIZE" count=1 >/dev/null 2>&1 || \
-		fail "could not read active zydefault"
-else
-	ACTIVE_LEB_SIZE=""
-fi
+ACTIVE_SEQ="$(read_byte_dec "$WORK/zyfwinfo.active.bin" 6)"
+[ -n "$ACTIVE_SEQ" ] || fail "could not read active zyfwinfo sequence"
 
-ACTIVE_SEQ="$(read_u16_le "$WORK/zyfwinfo.active.bin" 6)"
 NEW_SEQ=$((ACTIVE_SEQ + 1))
-[ "$NEW_SEQ" -le 65535 ] || fail "zyfwinfo sequence overflow"
-
-CHECKSUM=$((0x0e71 + NEW_SEQ))
-CHECKSUM_LO=$((CHECKSUM & 255))
-CHECKSUM_HI=$(((CHECKSUM >> 8) & 255))
+[ "$NEW_SEQ" -le 255 ] || fail "zyfwinfo sequence overflow"
 
 say "ACTIVE_SEQ=$ACTIVE_SEQ"
 say "NEW_SEQ=$NEW_SEQ"
+
+ACTIVE_LEB_SIZE="$(get_leb_size "$ACTIVE_UBI")"
+[ -n "$ACTIVE_LEB_SIZE" ] || fail "could not determine active LEB size"
+
+if [ -n "$ACTIVE_ZYDEFAULT" ]; then
+	say "ACTIVE_ZYDEFAULT=$ACTIVE_ZYDEFAULT"
+	dd if="$ACTIVE_ZYDEFAULT" of="$WORK/zydefault.active.bin" bs="$ACTIVE_LEB_SIZE" count=1 >/dev/null 2>&1 || \
+		fail "could not read active zydefault"
+else
+	say "WARNING: active zydefault volume not found; will write empty zydefault"
+fi
 
 say "[5] Formatting inactive stock bank"
 
@@ -292,7 +392,6 @@ LEB_SIZE="$(get_leb_size "$TARGET_UBI")"
 
 KERNEL_VOL_SIZE="$(round_up_leb_size "$INITRAMFS_SIZE" "$LEB_SIZE")"
 ROOTFS_VOL_SIZE="$LEB_SIZE"
-ZYFWINFO_VOL_SIZE="$LEB_SIZE"
 ZYDEFAULT_VOL_SIZE="$LEB_SIZE"
 
 say "LEB_SIZE=$LEB_SIZE"
@@ -306,7 +405,8 @@ ubimkvol "$TARGET_UBI" -n 0 -N kernel -s "$KERNEL_VOL_SIZE" >/dev/null || \
 ubimkvol "$TARGET_UBI" -n 1 -N rootfs -s "$ROOTFS_VOL_SIZE" >/dev/null || \
 	fail "could not create rootfs volume"
 
-ubimkvol "$TARGET_UBI" -n 2 -N zyfwinfo -s "$ZYFWINFO_VOL_SIZE" >/dev/null || \
+# Important: zyfwinfo stores only 256 bytes.
+ubimkvol "$TARGET_UBI" -n 2 -N zyfwinfo -s 256 >/dev/null || \
 	fail "could not create zyfwinfo volume"
 
 ubimkvol "$TARGET_UBI" -n 3 -N zydefault -s "$ZYDEFAULT_VOL_SIZE" >/dev/null || \
@@ -315,70 +415,100 @@ ubimkvol "$TARGET_UBI" -n 3 -N zydefault -s "$ZYDEFAULT_VOL_SIZE" >/dev/null || 
 ubimkvol "$TARGET_UBI" -n 4 -N rootfs_data -m >/dev/null || \
 	fail "could not create rootfs_data volume"
 
+TARGET_KERNEL="$(ubi_vol_dev_by_name "$TARGET_UBI" kernel || true)"
+TARGET_ROOTFS="$(ubi_vol_dev_by_name "$TARGET_UBI" rootfs || true)"
+TARGET_ZYFW="$(ubi_vol_dev_by_name "$TARGET_UBI" zyfwinfo || true)"
+TARGET_ZYDEFAULT="$(ubi_vol_dev_by_name "$TARGET_UBI" zydefault || true)"
+
+[ -n "$TARGET_KERNEL" ] || fail "target kernel volume not found"
+[ -n "$TARGET_ROOTFS" ] || fail "target rootfs volume not found"
+[ -n "$TARGET_ZYFW" ] || fail "target zyfwinfo volume not found"
+[ -n "$TARGET_ZYDEFAULT" ] || fail "target zydefault volume not found"
+
+say "TARGET_KERNEL=$TARGET_KERNEL"
+say "TARGET_ROOTFS=$TARGET_ROOTFS"
+say "TARGET_ZYFW=$TARGET_ZYFW"
+say "TARGET_ZYDEFAULT=$TARGET_ZYDEFAULT"
+
 say "[7] Writing initramfs FIT"
 
-ubiupdatevol "${TARGET_UBI}_0" "$INITRAMFS" >/dev/null || \
+ubiupdatevol "$TARGET_KERNEL" "$INITRAMFS" >/dev/null || \
 	fail "could not write initramfs kernel volume"
 
 dd if=/dev/zero of="$WORK/empty-rootfs.bin" bs="$LEB_SIZE" count=1 >/dev/null 2>&1 || \
 	fail "could not create empty rootfs placeholder"
 
-ubiupdatevol "${TARGET_UBI}_1" "$WORK/empty-rootfs.bin" >/dev/null || \
+ubiupdatevol "$TARGET_ROOTFS" "$WORK/empty-rootfs.bin" >/dev/null || \
 	fail "could not write empty rootfs placeholder"
 
-say "[8] Updating zyfwinfo (legacy boot method for firmware 4.1)"
+say "[8] Creating minimal zyfwinfo"
 
-cp "$WORK/zyfwinfo.active.bin" "$WORK/zyfwinfo.target.bin" || \
-	fail "could not copy zyfwinfo"
+CHECKSUM="$(make_minimal_zyfwinfo "$WORK/zyfwinfo.target.bin" "$NEW_SEQ")"
+say "Generated zyfwinfo checksum: 0x$(printf '%04x' "$CHECKSUM")"
 
-write_u16_le "$WORK/zyfwinfo.target.bin" 6 "$NEW_SEQ"
-write_byte "$WORK/zyfwinfo.target.bin" 254 "$CHECKSUM_LO"
-write_byte "$WORK/zyfwinfo.target.bin" 255 "$CHECKSUM_HI"
+verify_zyfwinfo_file "$WORK/zyfwinfo.target.bin" "$NEW_SEQ" "Generated target zyfwinfo"
 
-ubiupdatevol "${TARGET_UBI}_2" "$WORK/zyfwinfo.target.bin" >/dev/null || \
+say "[9] Writing zyfwinfo"
+
+ubiupdatevol "$TARGET_ZYFW" "$WORK/zyfwinfo.target.bin" >/dev/null || \
 	fail "could not write target zyfwinfo"
 
-say "[9] Writing zydefault"
+sync
+sleep 1
+
+dd if="$TARGET_ZYFW" of="$WORK/zyfwinfo.readback.bin" bs=256 count=1 >/dev/null 2>&1 || \
+	fail "could not read target zyfwinfo"
+
+verify_zyfwinfo_file "$WORK/zyfwinfo.readback.bin" "$NEW_SEQ" "Target zyfwinfo readback"
+
+say "[10] Writing zydefault"
 
 if [ -f "$WORK/zydefault.active.bin" ]; then
-	ubiupdatevol "${TARGET_UBI}_3" "$WORK/zydefault.active.bin" >/dev/null || \
+	ubiupdatevol "$TARGET_ZYDEFAULT" "$WORK/zydefault.active.bin" >/dev/null || \
 		fail "could not write zydefault"
 else
 	dd if=/dev/zero of="$WORK/zydefault.empty.bin" bs="$LEB_SIZE" count=1 >/dev/null 2>&1
-	ubiupdatevol "${TARGET_UBI}_3" "$WORK/zydefault.empty.bin" >/dev/null || \
+	ubiupdatevol "$TARGET_ZYDEFAULT" "$WORK/zydefault.empty.bin" >/dev/null || \
 		fail "could not write empty zydefault"
 fi
 
-say "[10] Setting boot switch (universal method)"
+sync
+sleep 1
 
-# Get current bootpart
-CURRENT_BOOTPART="$(fw_printenv bootpart 2>/dev/null | cut -d= -f2)"
-say "Current bootpart=$CURRENT_BOOTPART"
+say "[11] Final zyfwinfo verification after zydefault write"
 
-# Determine target bootpart
-if [ "$TARGET_NAME" = "ubi" ]; then
-	# Target is mtd6/ubi -> bootpart=1
-	NEW_BOOTPART="1"
-else
-	# Target is mtd7/ubi2 -> bootpart=0
-	NEW_BOOTPART="0"
+dd if="$TARGET_ZYFW" of="$WORK/zyfwinfo.final.bin" bs=256 count=1 >/dev/null 2>&1 || \
+	fail "could not read final target zyfwinfo"
+
+verify_zyfwinfo_file "$WORK/zyfwinfo.final.bin" "$NEW_SEQ" "Final target zyfwinfo"
+
+say "[12] Final sync"
+
+sync
+sync
+
+say "=============================================="
+say "SUCCESS:..."
+say "Temporary initramfs FIT has been written."
+say "Boot switch method: higher minimal zyfwinfo sequence only."
+say "No sys seqnum was used."
+say "No sys atsh was used."
+say "Target bank: mtd$TARGET_MTD / $TARGET_NAME"
+say "New zyfwinfo sequence: $ACTIVE_SEQ -> $NEW_SEQ"
+say "New zyfwinfo checksum: 0x$(printf '%04x' "$CHECKSUM")"
+say "No ´´ubootmod NAND conversion was done."
+say "No FIP was written."
+say "Log: $LOG"
+say "Please wait for two minute before access router at 192.168.1.1"
+say "=============================================="
+
+if [ "$NO_REBOOT" = "1" ]; then
+	say "NO_REBOOT=1 set. Not rebooting."
+	say "Do not run sys atsh/sys seqnum before reboot."
+	say "Manual raw check:"
+	say "dd if=$TARGET_ZYFW of=/tmp/initramfs_final_zyfwinfo_check.bin bs=256 count=1 2>/dev/null; hexdump -C /tmp/initramfs_final_zyfwinfo_check.bin"
+	exit 0
 fi
-
-say "Setting bootpart=$NEW_BOOTPART (to boot from $TARGET_NAME)"
-fw_setenv bootpart "$NEW_BOOTPART" || say "Warning: Failed to set bootpart"
-sys atsw
-# Also set bootcount=0 for clean boot
-fw_setenv bootcount 0 2>/dev/null
-
-say "[11] Final sync"
-
-sync
-sync
-
-say "=============================================="
-say "STAGE COMPLETE"
-say "Wait for two minute before accessing your router at 192.168.1.1"
-say "=============================================="
 
 say "Rebooting in 5 seconds..."
 sleep 5

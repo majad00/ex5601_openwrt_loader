@@ -1,12 +1,18 @@
 #!/bin/sh
 #written by majad.qureshi at lut.fi
-# UNIVERSAL VERSION - Works on both firmware 4.1 and newer versions
+# Modified universal boot-switch version for EX5601-T0 OEM V3.x / V4.x 
 
 set -eu
 
 FW_ARG="${1:-}"
 WORK="/tmp/matrix_fw"
 LOCKDIR="/tmp/matrix_flash.lock"
+
+
+ZYFWINFO_MODE="${ZYFWINFO_MODE:-minimal}"
+
+# NO_REBOOT=1 for testing.
+NO_REBOOT="${NO_REBOOT:-0}"
 
 fail() {
 	echo "ERROR: $*" >&2
@@ -45,7 +51,7 @@ find_ubi_by_mtdnum() {
 
 	for u in /sys/class/ubi/ubi[0-9]*; do
 		[ -f "$u/mtd_num" ] || continue
-		n="$(cat "$u/mtd_num")"
+		n="$(cat "$u/mtd_num" 2>/dev/null || true)"
 		[ "$n" = "$want" ] && {
 			echo "/dev/$(basename "$u")"
 			return 0
@@ -55,13 +61,35 @@ find_ubi_by_mtdnum() {
 	return 1
 }
 
+ubi_vol_dev_by_name() {
+	local ubidev="$1"
+	local want="$2"
+	local base="${ubidev##*/}"
+	local p name
+
+	for p in /sys/class/ubi/"$base"_*; do
+		[ -f "$p/name" ] || continue
+		name="$(cat "$p/name" 2>/dev/null || true)"
+		if [ "$name" = "$want" ]; then
+			echo "/dev/$(basename "$p")"
+			return 0
+		fi
+	done
+
+	return 1
+}
+
 get_leb_size() {
 	local ubidev="$1"
 	local base="${ubidev##*/}"
+	local leb=""
 
 	if [ -f "/sys/class/ubi/$base/usable_eb_size" ]; then
-		cat "/sys/class/ubi/$base/usable_eb_size"
-		return
+		leb="$(cat "/sys/class/ubi/$base/usable_eb_size" 2>/dev/null || true)"
+		if [ -n "$leb" ]; then
+			echo "$leb"
+			return 0
+		fi
 	fi
 
 	ubinfo "$ubidev" | awk -F: '/Logical eraseblock size/ {
@@ -75,6 +103,7 @@ get_leb_size() {
 round_up_leb_size() {
 	local size="$1"
 	local leb="$2"
+
 	echo $(( ((size + leb - 1) / leb) * leb ))
 }
 
@@ -92,6 +121,104 @@ write_byte_dec() {
 
 	oct="$(printf '%03o' "$value")"
 	printf "\\$oct" | dd of="$file" bs=1 seek="$offset" conv=notrunc 2>/dev/null
+}
+
+calc_zyfwinfo_checksum() {
+	local file="$1"
+
+	dd if="$file" bs=1 count=254 2>/dev/null | \
+		hexdump -v -e '1/1 "%u\n"' | \
+		awk '{s += $1} END {print s % 65536}'
+}
+
+read_zyfwinfo_stored_checksum() {
+	local file="$1"
+	local lo hi
+
+	lo="$(read_byte_dec "$file" 254)"
+	hi="$(read_byte_dec "$file" 255)"
+
+	echo $((lo + hi * 256))
+}
+
+write_zyfwinfo_checksum() {
+	local file="$1"
+	local checksum lo hi
+
+	checksum="$(calc_zyfwinfo_checksum "$file")"
+	lo=$((checksum & 255))
+	hi=$(((checksum >> 8) & 255))
+
+	write_byte_dec "$file" 254 "$lo"
+	write_byte_dec "$file" 255 "$hi"
+
+	echo "$checksum"
+}
+
+verify_zyfwinfo_file() {
+	local file="$1"
+	local expected_seq="$2"
+	local label="$3"
+	local seq calc stored
+
+	[ -f "$file" ] || fail "$label missing: $file"
+
+	seq="$(read_byte_dec "$file" 6)"
+	calc="$(calc_zyfwinfo_checksum "$file")"
+	stored="$(read_zyfwinfo_stored_checksum "$file")"
+
+	echo "$label:"
+	hexdump -C "$file"
+	echo "$label sequence: $seq"
+	echo "$label checksum calculated: 0x$(printf '%04x' "$calc")"
+	echo "$label checksum stored:     0x$(printf '%04x' "$stored")"
+
+	[ "$seq" = "$expected_seq" ] || fail "$label sequence mismatch: expected $expected_seq got $seq"
+	[ "$calc" = "$stored" ] || fail "$label checksum mismatch"
+}
+
+make_minimal_zyfwinfo() {
+	local file="$1"
+	local seq="$2"
+	local checksum
+
+	dd if=/dev/zero of="$file" bs=256 count=1 >/dev/null 2>&1 || \
+		fail "could not create minimal zyfwinfo"
+
+	# Magic: EXYZ
+	write_byte_dec "$file" 0 69
+	write_byte_dec "$file" 1 88
+	write_byte_dec "$file" 2 89
+	write_byte_dec "$file" 3 90
+
+	# Minimal OpenWrt-compatible fields.
+	write_byte_dec "$file" 4 2
+	write_byte_dec "$file" 6 "$seq"
+	write_byte_dec "$file" 9 1
+
+	checksum="$(write_zyfwinfo_checksum "$file")"
+	echo "$checksum"
+}
+
+make_copy_oem_zyfwinfo() {
+	local active_zyfw="$1"
+	local file="$2"
+	local seq="$3"
+	local checksum magic
+
+	dd if="$active_zyfw" of="$file" bs=256 count=1 >/dev/null 2>&1 || \
+		fail "could not read active zyfwinfo"
+
+	magic="$(dd if="$file" bs=4 count=1 2>/dev/null || true)"
+	[ "$magic" = "EXYZ" ] || fail "active zyfwinfo has bad magic"
+
+	write_byte_dec "$file" 6 "$seq"
+
+	
+	# no hardcoded base like 0x0e71.
+	#  recalculated.
+	checksum="$(write_zyfwinfo_checksum "$file")"
+	echo "$checksum"
 }
 
 cleanup() {
@@ -114,12 +241,12 @@ need_cmd ubirmvol
 need_cmd ubiupdatevol
 need_cmd wc
 need_cmd sync
-need_cmd fw_setenv
-need_cmd fw_printenv
-need_cmd sys
-need_cmd ubus
 
-echo "Matrix EX5601-T0 inactive-slot installer (UNIVERSAL)"
+echo "Matrix EX5601-T0 simple inactive-slot installer"
+echo "Boot switch method: zyfwinfo sequence only"
+echo "No sys atsw / no sys seqnum / no sys atsh"
+echo "ZYFWINFO_MODE=$ZYFWINFO_MODE"
+echo "NO_REBOOT=$NO_REBOOT"
 
 [ "$(id -u)" = "0" ] || fail "must run as root"
 
@@ -131,10 +258,10 @@ MTD_UBI="$(mtd_num_by_name ubi || true)"
 MTD_UBI2="$(mtd_num_by_name ubi2 || true)"
 MTD_ZYUBI="$(mtd_num_by_name zyubi || true)"
 
-[ "$MTD_PARENT" = "0" ] || fail "not OEM layout: spi0.1 parent mtd0 missing"
-[ "$MTD_UBI" = "6" ] || fail "not OEM layout: expected mtd6 named ubi"
-[ "$MTD_UBI2" = "7" ] || fail "not OEM layout: expected mtd7 named ubi2"
-[ "$MTD_ZYUBI" = "8" ] || fail "not OEM layout: expected mtd8 named zyubi"
+[ -n "$MTD_PARENT" ] || fail "not OEM layout: spi0.1 parent MTD missing"
+[ -n "$MTD_UBI" ] || fail "not OEM layout: MTD named ubi missing"
+[ -n "$MTD_UBI2" ] || fail "not OEM layout: MTD named ubi2 missing"
+[ -n "$MTD_ZYUBI" ] || fail "not OEM layout: MTD named zyubi missing"
 
 ROOTUBI="$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^rootubi=//p' | head -n1)"
 
@@ -174,7 +301,10 @@ if [ "$TARGET_MTD" = "$ACTIVE_MTD" ]; then
 fi
 
 echo "Active root: $ROOTUBI"
+echo "Active MTD: mtd$ACTIVE_MTD"
+echo "Active UBI: $ACTIVE_UBI"
 echo "Target slot: $TARGET_NAME"
+echo "Target MTD: mtd$TARGET_MTD"
 echo "Firmware: $FW"
 
 rm -rf "$WORK"
@@ -192,7 +322,8 @@ ROOT="$FWDIR/root"
 [ -f "$ROOT" ] || fail "root file missing"
 
 if [ "$REQUIRE_LABELSWAP" = "1" ]; then
-	grep -q "ubi_oem" "$KERNEL" 2>/dev/null || fail "image is not label-swap patched for ubi2 target"
+	grep -q "ubi_oem" "$KERNEL" 2>/dev/null || \
+		fail "image is not label-swap patched for ubi2 target"
 else
 	if grep -q "ubi_oem" "$KERNEL" 2>/dev/null; then
 		fail "label-swap image is not suitable for flashing physical ubi target"
@@ -202,9 +333,13 @@ fi
 KERNEL_SIZE="$(wc -c < "$KERNEL")"
 ROOT_SIZE="$(wc -c < "$ROOT")"
 
+echo "Kernel size: $KERNEL_SIZE"
+echo "Root size:   $ROOT_SIZE"
+
 TARGET_UBI="$(find_ubi_by_mtdnum "$TARGET_MTD" || true)"
 
 if [ -z "$TARGET_UBI" ]; then
+	echo "Attaching target mtd$TARGET_MTD"
 	ubiattach -p "/dev/mtd$TARGET_MTD" >/dev/null
 	sleep 1
 	TARGET_UBI="$(find_ubi_by_mtdnum "$TARGET_MTD" || true)"
@@ -212,16 +347,43 @@ fi
 
 [ -n "$TARGET_UBI" ] || fail "could not attach target UBI"
 
+echo "Target UBI: $TARGET_UBI"
+
 LEB_SIZE="$(get_leb_size "$TARGET_UBI")"
 [ -n "$LEB_SIZE" ] || fail "could not determine LEB size"
 
 KERNEL_VOL_SIZE="$(round_up_leb_size "$KERNEL_SIZE" "$LEB_SIZE")"
 ROOTFS_VOL_SIZE="$(round_up_leb_size "$ROOT_SIZE" "$LEB_SIZE")"
 
+echo "LEB size:          $LEB_SIZE"
+echo "Kernel vol size:   $KERNEL_VOL_SIZE"
+echo "Rootfs vol size:   $ROOTFS_VOL_SIZE"
+
+ACTIVE_ZYFW="$(ubi_vol_dev_by_name "$ACTIVE_UBI" zyfwinfo || true)"
+ACTIVE_ZYDEFAULT="$(ubi_vol_dev_by_name "$ACTIVE_UBI" zydefault || true)"
+
+[ -n "$ACTIVE_ZYFW" ] || fail "active zyfwinfo volume not found"
+[ -n "$ACTIVE_ZYDEFAULT" ] || fail "active zydefault volume not found"
+
+echo "Active zyfwinfo: $ACTIVE_ZYFW"
+echo "Active zydefault: $ACTIVE_ZYDEFAULT"
+
+ACTIVE_SEQ="$(dd if="$ACTIVE_ZYFW" bs=1 skip=6 count=1 2>/dev/null | hexdump -v -e '1/1 "%u"')"
+[ -n "$ACTIVE_SEQ" ] || fail "could not read active zyfwinfo sequence"
+
+NEWSEQ=$((ACTIVE_SEQ + 1))
+[ "$NEWSEQ" -le 255 ] || fail "zyfwinfo sequence overflow"
+
+echo "Active zyfwinfo sequence: $ACTIVE_SEQ"
+echo "Target zyfwinfo sequence: $NEWSEQ"
+
 echo "Preparing inactive slot"
 
 if command -v ubiblock >/dev/null 2>&1; then
-	ubiblock -r "${TARGET_UBI}_1" >/dev/null 2>&1 || true
+	for b in /dev/ubiblock*; do
+		[ -e "$b" ] || continue
+		ubiblock -r "$b" >/dev/null 2>&1 || true
+	done
 fi
 
 for v in rootfs_data zydefault zyfwinfo rootfs kernel; do
@@ -230,115 +392,100 @@ done
 
 ubimkvol "$TARGET_UBI" -n 0 -N kernel -s "$KERNEL_VOL_SIZE" >/dev/null
 ubimkvol "$TARGET_UBI" -n 1 -N rootfs -s "$ROOTFS_VOL_SIZE" >/dev/null
-ubimkvol "$TARGET_UBI" -n 2 -N zyfwinfo -s "$LEB_SIZE" >/dev/null
+ubimkvol "$TARGET_UBI" -n 2 -N zyfwinfo -s 256 >/dev/null
 ubimkvol "$TARGET_UBI" -n 3 -N zydefault -s "$LEB_SIZE" >/dev/null
 ubimkvol "$TARGET_UBI" -n 4 -N rootfs_data -m >/dev/null
 
+TARGET_KERNEL="$(ubi_vol_dev_by_name "$TARGET_UBI" kernel || true)"
+TARGET_ROOTFS="$(ubi_vol_dev_by_name "$TARGET_UBI" rootfs || true)"
+TARGET_ZYFW="$(ubi_vol_dev_by_name "$TARGET_UBI" zyfwinfo || true)"
+TARGET_ZYDEFAULT="$(ubi_vol_dev_by_name "$TARGET_UBI" zydefault || true)"
+
+[ -n "$TARGET_KERNEL" ] || fail "target kernel volume not found"
+[ -n "$TARGET_ROOTFS" ] || fail "target rootfs volume not found"
+[ -n "$TARGET_ZYFW" ] || fail "target zyfwinfo volume not found"
+[ -n "$TARGET_ZYDEFAULT" ] || fail "target zydefault volume not found"
+
+echo "Target kernel:    $TARGET_KERNEL"
+echo "Target rootfs:    $TARGET_ROOTFS"
+echo "Target zyfwinfo:  $TARGET_ZYFW"
+echo "Target zydefault: $TARGET_ZYDEFAULT"
+
 echo "Writing firmware"
 
-ubiupdatevol "${TARGET_UBI}_0" "$KERNEL" >/dev/null
-ubiupdatevol "${TARGET_UBI}_1" "$ROOT" >/dev/null
+ubiupdatevol "$TARGET_KERNEL" "$KERNEL" >/dev/null
+ubiupdatevol "$TARGET_ROOTFS" "$ROOT" >/dev/null
 
-echo "Updating boot metadata (legacy method for firmware 4.1)"
+echo "Creating target zyfwinfo"
 
-dd if="${ACTIVE_UBI}_2" of=/tmp/matrix_zyfwinfo.bin bs=256 count=1 >/dev/null 2>&1 || fail "could not read active zyfwinfo"
+case "$ZYFWINFO_MODE" in
+	minimal)
+		CHECKSUM="$(make_minimal_zyfwinfo /tmp/matrix_zyfwinfo.bin "$NEWSEQ")"
+		;;
+	copy_oem)
+		CHECKSUM="$(make_copy_oem_zyfwinfo "$ACTIVE_ZYFW" /tmp/matrix_zyfwinfo.bin "$NEWSEQ")"
+		;;
+	*)
+		fail "unsupported ZYFWINFO_MODE=$ZYFWINFO_MODE; use minimal or copy_oem"
+		;;
+esac
 
-ACTIVE_SEQ="$(read_byte_dec /tmp/matrix_zyfwinfo.bin 6)"
-[ -n "$ACTIVE_SEQ" ] || fail "could not read zyfwinfo sequence"
+echo "Generated zyfwinfo checksum: 0x$(printf '%04x' "$CHECKSUM")"
+verify_zyfwinfo_file /tmp/matrix_zyfwinfo.bin "$NEWSEQ" "Generated zyfwinfo"
 
-NEWSEQ=$((ACTIVE_SEQ + 1))
-[ "$NEWSEQ" -le 255 ] || fail "zyfwinfo sequence overflow"
+echo "Writing target zyfwinfo"
+ubiupdatevol "$TARGET_ZYFW" /tmp/matrix_zyfwinfo.bin >/dev/null || \
+	fail "could not write target zyfwinfo"
 
-CHECKSUM=$((0x0e71 + NEWSEQ))
-CHECKSUM_LO=$((CHECKSUM & 255))
-CHECKSUM_HI=$(((CHECKSUM >> 8) & 255))
+sync
+sleep 1
 
-write_byte_dec /tmp/matrix_zyfwinfo.bin 6 "$NEWSEQ"
-write_byte_dec /tmp/matrix_zyfwinfo.bin 254 "$CHECKSUM_LO"
-write_byte_dec /tmp/matrix_zyfwinfo.bin 255 "$CHECKSUM_HI"
+echo "Verifying target zyfwinfo readback"
+dd if="$TARGET_ZYFW" of=/tmp/matrix_zyfwinfo_readback.bin bs=256 count=1 >/dev/null 2>&1 || \
+	fail "could not read target zyfwinfo"
 
-ubiupdatevol "${TARGET_UBI}_2" /tmp/matrix_zyfwinfo.bin >/dev/null
+verify_zyfwinfo_file /tmp/matrix_zyfwinfo_readback.bin "$NEWSEQ" "Target zyfwinfo readback"
 
-dd if="${ACTIVE_UBI}_3" of=/tmp/matrix_zydefault.bin >/dev/null 2>&1 || fail "could not read active zydefault"
-ubiupdatevol "${TARGET_UBI}_3" /tmp/matrix_zydefault.bin >/dev/null
+echo "Copying active zydefault to target"
+dd if="$ACTIVE_ZYDEFAULT" of=/tmp/matrix_zydefault.bin bs=128K 2>/dev/null || \
+	fail "could not read active zydefault"
 
-echo "Setting boot switch (universal method)"
+ubiupdatevol "$TARGET_ZYDEFAULT" /tmp/matrix_zydefault.bin >/dev/null || \
+	fail "could not write target zydefault"
 
-# Try multiple methods to ensure boot switch works on all firmware versions
+sync
+sleep 1
 
-echo "Attempting OEM boot switch via ubus..."
-JSON="{
-	\"prefix\": \"/tmp\",
-	\"path\": \"$FW\",
-	\"command\": \"/lib/upgrade/do_stage2\",
-	\"options\": {
-		\"save_partitions\": 1
-	}
-}"
+echo "Final target zyfwinfo check after zydefault write"
+dd if="$TARGET_ZYFW" of=/tmp/matrix_zyfwinfo_final.bin bs=256 count=1 >/dev/null 2>&1 || \
+	fail "could not read final target zyfwinfo"
 
-UBUS_SUCCESS=0
-if echo "$JSON" | ubus call system sysupgrade 2>/dev/null; then
-	UBUS_SUCCESS=1
-	echo "✅ OEM boot switch triggered via ubus"
-else
-	echo "⚠️  ubus call failed, falling back to manual methods"
-fi
-
-#  2: U-Boot bootpart (works on some firmware)
-if [ $UBUS_SUCCESS -eq 0 ]; then
-	CURRENT_BOOTPART="$(fw_printenv bootpart 2>/dev/null | cut -d= -f2)"
-	echo "Current bootpart=$CURRENT_BOOTPART"
-
-	if [ "$TARGET_NAME" = "ubi" ]; then
-		NEW_BOOTPART="1"
-	else
-		NEW_BOOTPART="0"
-	fi
-
-	echo "Setting bootpart=$NEW_BOOTPART (to boot from $TARGET_NAME)"
-	fw_setenv bootpart "$NEW_BOOTPART" || echo "Warning: Failed to set bootpart"
-	fw_setenv bootcount 0 2>/dev/null
-	echo "✅ bootpart set to $NEW_BOOTPART"
-fi
-
-#  3: sys atsw (logging/diagnostic - kept for compatibility)
-echo "Running sys atsw for compatibility..."
-sys atsw 2>/dev/null || true
-
-#  4: Update zyubi data volume if available (extra safety)
-echo "Checking zyubi data volume..."
-if find_ubi_by_mtdnum 8 >/dev/null 2>&1; then
-	ZYUBI_DEV="$(find_ubi_by_mtdnum 8)"
-	if [ -e "${ZYUBI_DEV}_3" ]; then
-		echo "Updating zyubi boot flags..."
-		mkdir -p /tmp/zyubi_mount
-		if mount -t ubifs "${ZYUBI_DEV}_3" /tmp/zyubi_mount 2>/dev/null; then
-			# Update RebootCount to trigger boot from other bank
-			echo "999" > /tmp/zyubi_mount/RebootCount 2>/dev/null
-			echo "1" > /tmp/zyubi_mount/upgrade_available 2>/dev/null
-			echo "$TARGET_NAME" > /tmp/zyubi_mount/bootbank 2>/dev/null
-			sync
-			umount /tmp/zyubi_mount 2>/dev/null
-			echo "✅ zyubi boot flags updated"
-		fi
-		rmdir /tmp/zyubi_mount 2>/dev/null
-	fi
-fi
+verify_zyfwinfo_file /tmp/matrix_zyfwinfo_final.bin "$NEWSEQ" "Final target zyfwinfo"
 
 sync
 sync
 
 echo ""
 echo "=============================================="
-echo "Flash complete.  switch set using:"
-echo "  - zyfwinfo sequence (firmware 4.1 compatible)"
-if [ $UBUS_SUCCESS -eq 1 ]; then
-	echo "  - ✅ OEM ubus sysupgrade (primary method)"
-else
-	echo "  - ⚠️  bootpart (fallback method)"
-fi
-echo "Target slot: $TARGET_NAME (mtd$TARGET_MTD)"
+echo "Flash complete."
+echo "Boot switch method: higher zyfwinfo sequence only"
+echo "No sys atsw was used."
+echo "Current root: $ROOTUBI"
+echo "Next target slot: $TARGET_NAME"
+echo "Target MTD: mtd$TARGET_MTD"
+echo "zyfwinfo sequence: $ACTIVE_SEQ -> $NEWSEQ"
+echo "zyfwinfo mode: $ZYFWINFO_MODE"
+echo "zyfwinfo checksum: 0x$(printf '%04x' "$CHECKSUM")"
 echo "=============================================="
+
+if [ "$NO_REBOOT" = "1" ]; then
+	echo "NO_REBOOT=1 set. Not rebooting."
+	echo "For V3 test, do not run sys atsh/sys seqnum before reboot."
+	echo "Raw check command:"
+	echo "dd if=$TARGET_ZYFW of=/tmp/final_zyfwinfo_check.bin bs=256 count=1 2>/dev/null; hexdump -C /tmp/final_zyfwinfo_check.bin"
+	exit 0
+fi
+
 echo "Rebooting in 3 seconds."
 sleep 3
 reboot
