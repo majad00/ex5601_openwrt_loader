@@ -1,16 +1,59 @@
 #!/bin/sh
-# Matrix EX5601-T0 ubootmod initramfs stager - UNIVERSAL VERSION
-# Works on both firmware 4.1 and newer versions
+# Matrix EX5601-T0 ubootmod initramfs stager - UNIVERSAL VERSION 3
+# Works on firmware 3.x / 4.x / 5.x stock layout.
 # written by majad qureshi at lut .fi
-# Modified for universal boot switching
+# Modified for universal boot switching and no-UART diagnosis.
+#
+# Normal staging:
+#   /tmp/matrix_boot_initramfs.sh
+#
+# Stage without reboot:
+#   NO_REBOOT=1 /tmp/matrix_boot_initramfs.sh
+#
+# Read-only no-UART diagnosis:
+#   /tmp/matrix_boot_initramfs.sh --diagnose
+#
+# Optional custom initramfs path:
+#   INITRAMFS=/tmp/initramfs.bin /tmp/matrix_boot_initramfs.sh
 
 set -u
 
+ACTION="${1:-stage}"
+
+case "$ACTION" in
+	stage|--stage|"")
+		ACTION="stage"
+		;;
+	diagnose|--diagnose|check|--check)
+		ACTION="diagnose"
+		;;
+	*)
+		echo "Usage: $0 [stage|--stage|diagnose|--diagnose]" >&2
+		exit 1
+		;;
+esac
+
 INITRAMFS="${INITRAMFS:-/tmp/initramfs.bin}"
-LOG="${LOG:-/tmp/matrix_boot_initramfs.log}"
+
+if [ "$ACTION" = "diagnose" ]; then
+	LOG="${LOG:-/tmp/matrix_boot_initramfs_diagnose.log}"
+else
+	LOG="${LOG:-/tmp/matrix_boot_initramfs.log}"
+fi
+
 WORK="/tmp/matrix-initramfs-stage"
 LOCK="/tmp/matrix-initramfs-stage.lock"
 NO_REBOOT="${NO_REBOOT:-0}"
+
+
+ZYFWINFO_MODE="${ZYFWINFO_MODE:-rich}"
+
+# non-verifying zloader before reboot. Set ZLOADER_FIX=0 to disable.
+ZLOADER_FIX="${ZLOADER_FIX:-1}"
+OLD_ZLOADER_PATH="${OLD_ZLOADER_PATH:-/tmp/zl34.bin}"
+OLD_ZLOADER_MATCH="${OLD_ZLOADER_MATCH:-zld-2.4}"
+ZLOADER_ACTION="unknown"
+ZLOADER_CURRENT_STRING=""
 
 exec > "$LOG" 2>&1
 
@@ -164,6 +207,80 @@ write_byte() {
 	printf "\\$oct" | dd of="$file" bs=1 seek="$off" conv=notrunc 2>/dev/null
 }
 
+write_le32_dec() {
+	local file="$1"
+	local offset="$2"
+	local value="$3"
+	local b0 b1 b2 b3
+
+	[ "$value" -ge 0 ] || fail "le32 value out of range: $value"
+
+	b0=$((value & 255))
+	b1=$(((value >> 8) & 255))
+	b2=$(((value >> 16) & 255))
+	b3=$(((value >> 24) & 255))
+
+	write_byte "$file" "$offset" "$b0"
+	write_byte "$file" $((offset + 1)) "$b1"
+	write_byte "$file" $((offset + 2)) "$b2"
+	write_byte "$file" $((offset + 3)) "$b3"
+}
+
+read_le32_dec() {
+	local file="$1"
+	local offset="$2"
+	local bytes b0 b1 b2 b3
+
+	bytes="$(dd if="$file" bs=1 skip="$offset" count=4 2>/dev/null | hexdump -v -e '1/1 "%u\n"')"
+	b0="$(echo "$bytes" | sed -n '1p')"
+	b1="$(echo "$bytes" | sed -n '2p')"
+	b2="$(echo "$bytes" | sed -n '3p')"
+	b3="$(echo "$bytes" | sed -n '4p')"
+
+	[ -n "$b0" ] && [ -n "$b1" ] && [ -n "$b2" ] && [ -n "$b3" ] || \
+		fail "could not read le32 at offset $offset from $file"
+
+	echo $((b0 + b1 * 256 + b2 * 65536 + b3 * 16777216))
+}
+
+round_up_4k_size() {
+	local size="$1"
+	echo $(( ((size + 4095) / 4096) * 4096 ))
+}
+
+calc_rootfs_load_size_for_zyfwinfo() {
+	local rootfs="$1"
+	local magic bytes_used load_size data_bytes sysname
+
+	magic="$(dd if="$rootfs" bs=4 count=1 2>/dev/null | hexdump -v -e '1/1 "%02x"')"
+
+	case "$magic" in
+		68737173)
+			# Squashfs magic "hsqs". ACEA zloader uses bytes_used rounded to 4 KiB.
+			bytes_used="$(read_le32_dec "$rootfs" 40)"
+			load_size="$(round_up_4k_size "$bytes_used")"
+			printf "Target rootfs squashfs bytes_used=0x%08x load_size=0x%08x\n" "$bytes_used" "$load_size" >&2
+			echo "$load_size"
+			;;
+		00000000)
+			# The initramfs stager intentionally writes an empty rootfs placeholder.
+			# With the old zloader workaround this field is not used, but keep it honest.
+			printf "Target rootfs placeholder detected; rich zyfwinfo rootfs load size set to 0x00000000\n" >&2
+			echo 0
+			;;
+		*)
+			# Fallback for unusual images: use UBI data_bytes if available, rounded to 4 KiB.
+			sysname="${rootfs#/dev/}"
+			data_bytes=""
+			[ -f "/sys/class/ubi/$sysname/data_bytes" ] && data_bytes="$(cat "/sys/class/ubi/$sysname/data_bytes" 2>/dev/null || true)"
+			[ -n "$data_bytes" ] || fail "target rootfs is not squashfs/empty and data_bytes is unavailable; magic=$magic"
+			load_size="$(round_up_4k_size "$data_bytes")"
+			printf "WARNING: target rootfs magic=%s; using UBI data_bytes load_size=0x%08x\n" "$magic" "$load_size" >&2
+			echo "$load_size"
+			;;
+	esac
+}
+
 calc_zyfwinfo_checksum() {
 	local file="$1"
 
@@ -208,8 +325,8 @@ verify_zyfwinfo_file() {
 	calc="$(calc_zyfwinfo_checksum "$file")"
 	stored="$(read_zyfwinfo_stored_checksum "$file")"
 
-	say "$label:"
-	hexdump -C "$file"
+	say "$label first 1 KiB:"
+	dd if="$file" bs=1024 count=1 2>/dev/null | hexdump -C
 	say "$label sequence: $seq"
 	say "$label checksum calculated: 0x$(printf '%04x' "$calc")"
 	say "$label checksum stored:     0x$(printf '%04x' "$stored")"
@@ -241,16 +358,411 @@ make_minimal_zyfwinfo() {
 	echo "$checksum"
 }
 
+make_rich_zyfwinfo() {
+	local active_zyfw="$1"
+	local file="$2"
+	local seq="$3"
+	local target_rootfs="$4"
+	local leb_size="$5"
+	local checksum magic rootfs_load_size
+
+	# Copy the full active zyfwinfo LEB. New ACEA zloader reads at least 0x400,
+	# while old ACDZ zloader reads only 0x100, so this is compatible with both.
+	dd if="$active_zyfw" of="$file" bs="$leb_size" count=1 >/dev/null 2>&1 || \
+		fail "could not read full active zyfwinfo"
+
+	magic="$(dd if="$file" bs=4 count=1 2>/dev/null || true)"
+	[ "$magic" = "EXYZ" ] || fail "active zyfwinfo has bad magic"
+
+	# Sequence controls which bank zloader selects.
+	write_byte "$file" 6 "$seq"
+
+	# ACEA zloader uses the little-endian value at 0x78 as rootfs load size.
+	# For this initramfs stager the rootfs volume is normally an empty placeholder,
+	# so this becomes 0. If the target rootfs is squashfs, calculate its real size.
+	rootfs_load_size="$(calc_rootfs_load_size_for_zyfwinfo "$target_rootfs")"
+	write_le32_dec "$file" 120 "$rootfs_load_size"
+
+	printf "Target rootfs load size for rich zyfwinfo: 0x%08x\n" "$rootfs_load_size" >&2
+
+	# Recalculate first-0x100 zyfwinfo checksum.
+	write_byte "$file" 254 0
+	write_byte "$file" 255 0
+	checksum="$(write_zyfwinfo_checksum "$file")"
+	echo "$checksum"
+}
+
+inspect_zloader_for_switch() {
+	local zld_mtd="$1"
+	local current_file="$WORK/zloader.current.bin"
+	local old_string=""
+
+	ZLOADER_ACTION="keep"
+	ZLOADER_CURRENT_STRING="unknown"
+
+	dd if="/dev/mtd$zld_mtd" of="$current_file" bs=256K count=1 >/dev/null 2>&1 || \
+		fail "could not read current zloader from /dev/mtd$zld_mtd"
+
+	ZLOADER_CURRENT_STRING="$(strings "$current_file" | grep -E 'zld-[0-9]' | head -n1 || true)"
+	[ -n "$ZLOADER_CURRENT_STRING" ] || ZLOADER_CURRENT_STRING="unknown"
+
+	say "Current zloader: $ZLOADER_CURRENT_STRING"
+
+	if echo "$ZLOADER_CURRENT_STRING" | grep -q "$OLD_ZLOADER_MATCH"; then
+		ZLOADER_ACTION="keep"
+		say "Current zloader already matches old non-verifying loader pattern: $OLD_ZLOADER_MATCH"
+		return 0
+	fi
+
+	ZLOADER_ACTION="replace"
+	say "Current zloader does not match $OLD_ZLOADER_MATCH; will replace it before reboot."
+
+	[ -f "$OLD_ZLOADER_PATH" ] || fail "old zloader replacement missing: $OLD_ZLOADER_PATH"
+	old_string="$(strings "$OLD_ZLOADER_PATH" | grep -E 'zld-[0-9]' | head -n1 || true)"
+	[ -n "$old_string" ] || fail "could not identify zloader string in $OLD_ZLOADER_PATH"
+	say "Replacement zloader: $old_string"
+
+	echo "$old_string" | grep -q "$OLD_ZLOADER_MATCH" || \
+		fail "$OLD_ZLOADER_PATH does not look like expected old zloader ($OLD_ZLOADER_MATCH)"
+}
+
+apply_zloader_switch_if_needed() {
+	local zld_mtd="$1"
+	local zld_size check_file ro
+
+	[ "$ZLOADER_FIX" = "1" ] || {
+		say "ZLOADER_FIX=0; not replacing zloader."
+		return 0
+	}
+
+	[ "$ZLOADER_ACTION" = "replace" ] || {
+		say "Zloader replacement not needed."
+		return 0
+	}
+
+	say "Backing up current zloader to $WORK/zloader.before_replace.bin"
+	dd if="/dev/mtd$zld_mtd" of="$WORK/zloader.before_replace.bin" bs=256K count=1 >/dev/null 2>&1 || \
+		fail "could not backup current zloader"
+
+	if [ -f "/sys/class/mtd/mtd$zld_mtd/ro" ]; then
+		ro="$(cat "/sys/class/mtd/mtd$zld_mtd/ro" 2>/dev/null || echo 0)"
+		if [ "$ro" != "0" ]; then
+			say "zloader MTD is read-only; trying /tmp/mtd-rw.ko"
+			insmod /tmp/mtd-rw.ko i_want_a_brick=1 2>/dev/null || true
+			ro="$(cat "/sys/class/mtd/mtd$zld_mtd/ro" 2>/dev/null || echo 1)"
+			[ "$ro" = "0" ] || fail "zloader MTD is still read-only"
+		fi
+	fi
+
+	say "Writing old zloader from $OLD_ZLOADER_PATH to /dev/mtd$zld_mtd"
+	mtd write "$OLD_ZLOADER_PATH" "/dev/mtd$zld_mtd" >/dev/null || \
+		fail "could not write old zloader"
+	sync
+
+	zld_size="$(wc -c < "$OLD_ZLOADER_PATH")"
+	check_file="$WORK/zloader.after_replace.bin"
+	dd if="/dev/mtd$zld_mtd" of="$check_file" bs="$zld_size" count=1 >/dev/null 2>&1 || \
+		fail "could not read back replaced zloader"
+
+	cmp "$OLD_ZLOADER_PATH" "$check_file" >/dev/null || fail "old zloader readback mismatch"
+	say "OLD_ZLOADER_WRITE_OK"
+	strings "$check_file" | grep -E 'zld-[0-9]' | head -n1 || true
+}
+
+inspect_initramfs_strings() {
+	say "[2b] Inspecting initramfs strings"
+
+	if command -v strings >/dev/null 2>&1; then
+		say "Interesting initramfs strings:"
+		strings "$INITRAMFS" | grep -Ei 'ubootmod|stock|labelswap|bootargs|rootubi|ubi_oem|EX5601|OpenWrt|Linux' | head -n 80 || true
+
+		if strings "$INITRAMFS" | grep -qi 'ubootmod'; then
+			say "WARNING: initramfs contains 'ubootmod'."
+			say "WARNING: stock Zyxel zloader may fail with: bootargs in fdt not found"
+		fi
+
+		if strings "$INITRAMFS" | grep -qiE 'stock|labelswap|ubi_oem'; then
+			say "INITRAMFS_LAYOUT_HINT=stock_or_labelswap"
+		else
+			say "WARNING: initramfs does not show stock/labelswap/ubi_oem strings."
+			say "WARNING: this may still boot, but without UART it is harder to confirm."
+		fi
+	else
+		say "WARNING: strings command not found; skipping initramfs string diagnosis"
+	fi
+}
+
+diagnose_dump_zyfwinfo() {
+	local label="$1"
+	local dev="$2"
+	local out="$WORK/diagnose_${label}_zyfwinfo.bin"
+	local seq calc stored
+
+	say ""
+	say "===== $label zyfwinfo ====="
+	say "device=$dev"
+
+	dd if="$dev" of="$out" bs=256 count=1 >/dev/null 2>&1 || {
+		say "ERROR: could not read $label zyfwinfo from $dev"
+		return 1
+	}
+
+	hexdump -C "$out"
+
+	seq="$(read_byte_dec "$out" 6)"
+	calc="$(calc_zyfwinfo_checksum "$out")"
+	stored="$(read_zyfwinfo_stored_checksum "$out")"
+
+	say "${label}_SEQ=$seq"
+	say "${label}_CHECKSUM_CALC=0x$(printf '%04x' "$calc")"
+	say "${label}_CHECKSUM_STORED=0x$(printf '%04x' "$stored")"
+
+	if [ "$calc" = "$stored" ]; then
+		say "${label}_CHECKSUM=OK"
+	else
+		say "${label}_CHECKSUM=BAD"
+	fi
+
+	echo "$seq" > "$WORK/diagnose_${label}_seq.txt"
+	echo "$calc" > "$WORK/diagnose_${label}_calc.txt"
+	echo "$stored" > "$WORK/diagnose_${label}_stored.txt"
+}
+
+diagnose_kernel_volume() {
+	local dev="$1"
+	local target_name="$2"
+	local sample="$WORK/diagnose_target_kernel_sample.bin"
+	local magic
+
+	say ""
+	say "===== target kernel/FIT diagnosis ====="
+	say "device=$dev"
+
+	# Read up to 16 MiB, enough for typical initramfs FITs and DTB strings.
+	dd if="$dev" of="$sample" bs=512K count=32 >/dev/null 2>&1 || {
+		say "ERROR: could not read target kernel volume"
+		return 1
+	}
+
+	magic="$(dd if="$sample" bs=4 count=1 2>/dev/null | hexdump -v -e '4/1 "%02x"')"
+	say "FIT_MAGIC=$magic"
+
+	if [ "$magic" = "d00dfeed" ]; then
+		say "FIT_MAGIC_CHECK=OK"
+	else
+		say "FIT_MAGIC_CHECK=BAD"
+	fi
+
+	if command -v strings >/dev/null 2>&1; then
+		say ""
+		say "Interesting strings from target kernel:"
+		strings "$sample" | grep -Ei 'ubootmod|stock|labelswap|bootargs|rootubi|ubi_oem|EX5601|OpenWrt|Linux' | head -n 100 || true
+	else
+		say "WARNING: strings command not found; skipping target kernel string diagnosis"
+	fi
+
+	if grep -aq 'ubootmod' "$sample"; then
+		say "WARNING: target image contains 'ubootmod'."
+		say "WARNING: stock Zyxel zloader may fail with: bootargs in fdt not found"
+	fi
+
+	if [ "$target_name" = "ubi2" ]; then
+		if grep -aqE 'labelswap|ubi_oem' "$sample"; then
+			say "LABELSWAP_CHECK=probably OK for physical ubi2 target"
+		else
+			say "WARNING: target is physical ubi2, but image does not show labelswap/ubi_oem string"
+		fi
+	fi
+}
+
+diagnose_no_uart() {
+	local CMDLINE ROOTUBI
+	local MTD_PARENT MTD_UBI MTD_UBI2 MTD_ZYUBI
+	local ACTIVE_MTD TARGET_MTD TARGET_NAME
+	local ACTIVE_UBI TARGET_UBI
+	local ACTIVE_ZYFW TARGET_ZYFW TARGET_KERNEL TARGET_ROOTFS TARGET_ZYDEFAULT
+	local ACTIVE_SEQ TARGET_SEQ TARGET_CALC TARGET_STORED MAGIC
+
+	say "=== Matrix EX5601-T0 no-UART diagnosis ==="
+	say "READ-ONLY MODE"
+	say "No formatting, no writing, no sys atsw, no sys seqnum, no sys atsh."
+	say "LOG=$LOG"
+	say ""
+
+	need_cmd awk
+	need_cmd cat
+	need_cmd dd
+	need_cmd grep
+	need_cmd hexdump
+	need_cmd mkdir
+	need_cmd sleep
+	need_cmd ubiattach
+	need_cmd ubinfo
+
+	rm -rf "$WORK/diagnose"
+	mkdir -p "$WORK"
+
+	say "===== date ====="
+	date 2>/dev/null || true
+
+	say ""
+	say "===== /proc/cmdline ====="
+	[ -r /proc/cmdline ] || fail "/proc/cmdline missing"
+	cat /proc/cmdline
+
+	say ""
+	say "===== /proc/mtd ====="
+	[ -r /proc/mtd ] || fail "/proc/mtd missing"
+	cat /proc/mtd
+
+	CMDLINE="$(cat /proc/cmdline)"
+	ROOTUBI="$(awk '{
+		for (i = 1; i <= NF; i++) {
+			if ($i ~ /^rootubi=/) {
+				sub(/^rootubi=/, "", $i)
+				print $i
+				exit
+			}
+		}
+	}' /proc/cmdline)"
+
+	MTD_PARENT="$(mtd_num_by_name spi0.1 || true)"
+	MTD_UBI="$(mtd_num_by_name ubi || true)"
+	MTD_UBI2="$(mtd_num_by_name ubi2 || true)"
+	MTD_ZYUBI="$(mtd_num_by_name zyubi || true)"
+
+	[ -n "$MTD_PARENT" ] || fail "parent mtd named spi0.1 missing"
+	[ -n "$MTD_UBI" ] || fail "mtd named ubi missing"
+	[ -n "$MTD_UBI2" ] || fail "mtd named ubi2 missing"
+	[ -n "$MTD_ZYUBI" ] || fail "mtd named zyubi missing"
+
+	case "$ROOTUBI" in
+		ubi)
+			ACTIVE_MTD="$MTD_UBI"
+			TARGET_MTD="$MTD_UBI2"
+			TARGET_NAME="ubi2"
+			;;
+		ubi2)
+			ACTIVE_MTD="$MTD_UBI2"
+			TARGET_MTD="$MTD_UBI"
+			TARGET_NAME="ubi"
+			;;
+		*)
+			fail "unsupported or missing rootubi=$ROOTUBI"
+			;;
+	esac
+
+	say ""
+	say "===== bank decision ====="
+	say "ROOTUBI=$ROOTUBI"
+	say "MTD_PARENT=mtd$MTD_PARENT"
+	say "MTD_UBI=mtd$MTD_UBI"
+	say "MTD_UBI2=mtd$MTD_UBI2"
+	say "MTD_ZYUBI=mtd$MTD_ZYUBI"
+	say "ACTIVE_MTD=mtd$ACTIVE_MTD"
+	say "TARGET_MTD=mtd$TARGET_MTD"
+	say "TARGET_NAME=$TARGET_NAME"
+
+	ACTIVE_UBI="$(attach_mtd "$ACTIVE_MTD")"
+	TARGET_UBI="$(attach_mtd "$TARGET_MTD")"
+
+	say "ACTIVE_UBI=$ACTIVE_UBI"
+	say "TARGET_UBI=$TARGET_UBI"
+
+	say ""
+	say "===== ubinfo -a ====="
+	ubinfo -a 2>&1 || true
+
+	ACTIVE_ZYFW="$(ubi_vol_dev_by_name "$ACTIVE_UBI" zyfwinfo || true)"
+	TARGET_ZYFW="$(ubi_vol_dev_by_name "$TARGET_UBI" zyfwinfo || true)"
+	TARGET_KERNEL="$(ubi_vol_dev_by_name "$TARGET_UBI" kernel || true)"
+	TARGET_ROOTFS="$(ubi_vol_dev_by_name "$TARGET_UBI" rootfs || true)"
+	TARGET_ZYDEFAULT="$(ubi_vol_dev_by_name "$TARGET_UBI" zydefault || true)"
+
+	[ -n "$ACTIVE_ZYFW" ] || fail "active zyfwinfo not found"
+	[ -n "$TARGET_ZYFW" ] || fail "target zyfwinfo not found"
+	[ -n "$TARGET_KERNEL" ] || fail "target kernel not found"
+	[ -n "$TARGET_ROOTFS" ] || fail "target rootfs not found"
+
+	say ""
+	say "===== target volume devices ====="
+	say "TARGET_KERNEL=$TARGET_KERNEL"
+	say "TARGET_ROOTFS=$TARGET_ROOTFS"
+	say "TARGET_ZYFW=$TARGET_ZYFW"
+	say "TARGET_ZYDEFAULT=${TARGET_ZYDEFAULT:-missing}"
+
+	diagnose_dump_zyfwinfo active "$ACTIVE_ZYFW"
+	diagnose_dump_zyfwinfo target "$TARGET_ZYFW"
+
+	ACTIVE_SEQ="$(cat "$WORK/diagnose_active_seq.txt")"
+	TARGET_SEQ="$(cat "$WORK/diagnose_target_seq.txt")"
+	TARGET_CALC="$(cat "$WORK/diagnose_target_calc.txt")"
+	TARGET_STORED="$(cat "$WORK/diagnose_target_stored.txt")"
+
+	say ""
+	say "===== boot switch condition ====="
+
+	if [ "$TARGET_CALC" = "$TARGET_STORED" ]; then
+		say "TARGET_ZYFWINFO_CHECKSUM=OK"
+	else
+		say "TARGET_ZYFWINFO_CHECKSUM=BAD"
+	fi
+
+	if [ "$TARGET_SEQ" -gt "$ACTIVE_SEQ" ] 2>/dev/null; then
+		say "TARGET_SEQUENCE_HIGHER=OK"
+	else
+		say "TARGET_SEQUENCE_HIGHER=BAD"
+	fi
+
+	say "ACTIVE_SEQ=$ACTIVE_SEQ"
+	say "TARGET_SEQ=$TARGET_SEQ"
+
+	diagnose_kernel_volume "$TARGET_KERNEL" "$TARGET_NAME"
+
+	say ""
+	say "===== optional current initramfs file diagnosis ====="
+
+	if [ -f "$INITRAMFS" ]; then
+		say "INITRAMFS=$INITRAMFS exists"
+		MAGIC="$(dd if="$INITRAMFS" bs=4 count=1 2>/dev/null | hexdump -v -e '4/1 "%02x"')"
+		say "INITRAMFS_FIT_MAGIC=$MAGIC"
+		inspect_initramfs_strings
+	else
+		say "INITRAMFS=$INITRAMFS does not exist; skipping file diagnosis"
+	fi
+
+	say ""
+	say "===== diagnosis summary ====="
+
+	if [ "$TARGET_CALC" = "$TARGET_STORED" ] && [ "$TARGET_SEQ" -gt "$ACTIVE_SEQ" ] 2>/dev/null; then
+		say "ZYFWINFO_SWITCH_CONDITION=OK"
+	else
+		say "ZYFWINFO_SWITCH_CONDITION=BAD"
+	fi
+
+	say "If ZYFWINFO_SWITCH_CONDITION=OK but router still boots OEM, suspect wrong FIT/DTB image."
+	say "If target image contains 'ubootmod', stock zloader may stop with: bootargs in fdt not found"
+	say "Log saved to: $LOG"
+}
+
 cleanup() {
 	rm -rf "$LOCK"
 }
 trap cleanup EXIT
 
+if [ "$ACTION" = "diagnose" ]; then
+	diagnose_no_uart
+	exit 0
+fi
+
 mkdir "$LOCK" 2>/dev/null || fail "another initramfs staging process is running"
 
 say "=== Matrix EX5601-T0 initramfs stager ==="
-say "Boot switch method: zyfwinfo sequence only"
+say "Boot switch method: rich zyfwinfo sequence + optional old zloader workaround"
 say "No sys atsw / no sys seqnum / no sys atsh"
+say "ZYFWINFO_MODE=$ZYFWINFO_MODE"
+say "ZLOADER_FIX=$ZLOADER_FIX"
+say "OLD_ZLOADER_PATH=$OLD_ZLOADER_PATH"
 say "NO_REBOOT=$NO_REBOOT"
 say "INITRAMFS=$INITRAMFS"
 say "LOG=$LOG"
@@ -263,6 +775,11 @@ need_cmd cp
 need_cmd dd
 need_cmd grep
 need_cmd hexdump
+need_cmd strings
+need_cmd mtd
+need_cmd cmp
+need_cmd sed
+need_cmd head
 need_cmd mkdir
 need_cmd rm
 need_cmd sleep
@@ -294,6 +811,7 @@ case "$MAGIC" in
 esac
 
 say "INITRAMFS_SIZE=$INITRAMFS_SIZE"
+inspect_initramfs_strings
 
 say "[3] Checking OEM stock layout"
 
@@ -304,11 +822,13 @@ MTD_PARENT="$(mtd_num_by_name spi0.1 || true)"
 MTD_UBI="$(mtd_num_by_name ubi || true)"
 MTD_UBI2="$(mtd_num_by_name ubi2 || true)"
 MTD_ZYUBI="$(mtd_num_by_name zyubi || true)"
+MTD_ZLOADER="$(mtd_num_by_name zloader || true)"
 
 [ -n "$MTD_PARENT" ] || fail "not OEM stock layout: parent mtd named spi0.1 missing"
 [ -n "$MTD_UBI" ] || fail "not OEM stock layout: mtd named ubi missing"
 [ -n "$MTD_UBI2" ] || fail "not OEM stock layout: mtd named ubi2 missing"
 [ -n "$MTD_ZYUBI" ] || fail "not OEM stock layout: mtd named zyubi missing"
+[ -n "$MTD_ZLOADER" ] || fail "not OEM stock layout: mtd named zloader missing"
 
 CMDLINE="$(cat /proc/cmdline)"
 say "$CMDLINE"
@@ -336,6 +856,7 @@ say "MTD_PARENT=mtd$MTD_PARENT"
 say "MTD_UBI=mtd$MTD_UBI"
 say "MTD_UBI2=mtd$MTD_UBI2"
 say "MTD_ZYUBI=mtd$MTD_ZYUBI"
+say "MTD_ZLOADER=mtd$MTD_ZLOADER"
 say "ACTIVE_MTD=mtd$ACTIVE_MTD"
 say "TARGET_MTD=mtd$TARGET_MTD"
 say "TARGET_NAME=$TARGET_NAME"
@@ -353,6 +874,13 @@ say "ACTIVE_ZYFW=$ACTIVE_ZYFW"
 
 rm -rf "$WORK"
 mkdir -p "$WORK"
+
+if [ "$ZLOADER_FIX" = "1" ]; then
+	inspect_zloader_for_switch "$MTD_ZLOADER"
+else
+	ZLOADER_ACTION="disabled"
+	say "ZLOADER_FIX=0; zloader replacement disabled."
+fi
 
 dd if="$ACTIVE_ZYFW" of="$WORK/zyfwinfo.active.bin" bs=256 count=1 >/dev/null 2>&1 || \
 	fail "could not read active zyfwinfo"
@@ -405,8 +933,8 @@ ubimkvol "$TARGET_UBI" -n 0 -N kernel -s "$KERNEL_VOL_SIZE" >/dev/null || \
 ubimkvol "$TARGET_UBI" -n 1 -N rootfs -s "$ROOTFS_VOL_SIZE" >/dev/null || \
 	fail "could not create rootfs volume"
 
-# Important: zyfwinfo stores only 256 bytes.
-ubimkvol "$TARGET_UBI" -n 2 -N zyfwinfo -s 256 >/dev/null || \
+# Rich zyfwinfo needs a full LEB because ACEA zloader reads at least 0x400 bytes.
+ubimkvol "$TARGET_UBI" -n 2 -N zyfwinfo -s "$LEB_SIZE" >/dev/null || \
 	fail "could not create zyfwinfo volume"
 
 ubimkvol "$TARGET_UBI" -n 3 -N zydefault -s "$ZYDEFAULT_VOL_SIZE" >/dev/null || \
@@ -441,9 +969,20 @@ dd if=/dev/zero of="$WORK/empty-rootfs.bin" bs="$LEB_SIZE" count=1 >/dev/null 2>
 ubiupdatevol "$TARGET_ROOTFS" "$WORK/empty-rootfs.bin" >/dev/null || \
 	fail "could not write empty rootfs placeholder"
 
-say "[8] Creating minimal zyfwinfo"
+say "[8] Creating target zyfwinfo"
 
-CHECKSUM="$(make_minimal_zyfwinfo "$WORK/zyfwinfo.target.bin" "$NEW_SEQ")"
+case "$ZYFWINFO_MODE" in
+	minimal)
+		CHECKSUM="$(make_minimal_zyfwinfo "$WORK/zyfwinfo.target.bin" "$NEW_SEQ")"
+		;;
+	rich|copy_oem|copy_oem_rich)
+		CHECKSUM="$(make_rich_zyfwinfo "$ACTIVE_ZYFW" "$WORK/zyfwinfo.target.bin" "$NEW_SEQ" "$TARGET_ROOTFS" "$LEB_SIZE")"
+		;;
+	*)
+		fail "unsupported ZYFWINFO_MODE=$ZYFWINFO_MODE; use rich or minimal"
+		;;
+esac
+
 say "Generated zyfwinfo checksum: 0x$(printf '%04x' "$CHECKSUM")"
 
 verify_zyfwinfo_file "$WORK/zyfwinfo.target.bin" "$NEW_SEQ" "Generated target zyfwinfo"
@@ -456,7 +995,7 @@ ubiupdatevol "$TARGET_ZYFW" "$WORK/zyfwinfo.target.bin" >/dev/null || \
 sync
 sleep 1
 
-dd if="$TARGET_ZYFW" of="$WORK/zyfwinfo.readback.bin" bs=256 count=1 >/dev/null 2>&1 || \
+dd if="$TARGET_ZYFW" of="$WORK/zyfwinfo.readback.bin" bs=1024 count=1 >/dev/null 2>&1 || \
 	fail "could not read target zyfwinfo"
 
 verify_zyfwinfo_file "$WORK/zyfwinfo.readback.bin" "$NEW_SEQ" "Target zyfwinfo readback"
@@ -477,7 +1016,7 @@ sleep 1
 
 say "[11] Final zyfwinfo verification after zydefault write"
 
-dd if="$TARGET_ZYFW" of="$WORK/zyfwinfo.final.bin" bs=256 count=1 >/dev/null 2>&1 || \
+dd if="$TARGET_ZYFW" of="$WORK/zyfwinfo.final.bin" bs=1024 count=1 >/dev/null 2>&1 || \
 	fail "could not read final target zyfwinfo"
 
 verify_zyfwinfo_file "$WORK/zyfwinfo.final.bin" "$NEW_SEQ" "Final target zyfwinfo"
@@ -488,27 +1027,38 @@ sync
 sync
 
 say "=============================================="
-say "SUCCESS:..."
+say "SUCCESS: initramfs staging complete"
 say "Temporary initramfs FIT has been written."
-say "Boot switch method: higher minimal zyfwinfo sequence only."
+say "Boot switch method: rich zyfwinfo sequence + zloader compatibility."
+say "No sys atsw was used."
 say "No sys seqnum was used."
 say "No sys atsh was used."
 say "Target bank: mtd$TARGET_MTD / $TARGET_NAME"
 say "New zyfwinfo sequence: $ACTIVE_SEQ -> $NEW_SEQ"
+say "New zyfwinfo mode: $ZYFWINFO_MODE"
 say "New zyfwinfo checksum: 0x$(printf '%04x' "$CHECKSUM")"
-say "No ´´ubootmod NAND conversion was done."
+say "zloader action: $ZLOADER_ACTION"
+say "zloader before: $ZLOADER_CURRENT_STRING"
+say "No ubootmod NAND conversion was done."
 say "No FIP was written."
 say "Log: $LOG"
-say "Please wait for two minute before access router at 192.168.1.1"
+say "Please wait for two minutes before accessing router at 192.168.1.1"
 say "=============================================="
 
 if [ "$NO_REBOOT" = "1" ]; then
 	say "NO_REBOOT=1 set. Not rebooting."
 	say "Do not run sys atsh/sys seqnum before reboot."
+	say "Zloader planned action was: $ZLOADER_ACTION"
+	say "Zloader replacement is NOT applied when NO_REBOOT=1."
 	say "Manual raw check:"
-	say "dd if=$TARGET_ZYFW of=/tmp/initramfs_final_zyfwinfo_check.bin bs=256 count=1 2>/dev/null; hexdump -C /tmp/initramfs_final_zyfwinfo_check.bin"
+	say "dd if=$TARGET_ZYFW of=/tmp/initramfs_final_zyfwinfo_check.bin bs=1024 count=1 2>/dev/null; hexdump -C /tmp/initramfs_final_zyfwinfo_check.bin"
+	say "You can also run read-only diagnosis:"
+	say "$0 --diagnose"
 	exit 0
 fi
+
+apply_zloader_switch_if_needed "$MTD_ZLOADER"
+sync
 
 say "Rebooting in 5 seconds..."
 sleep 5

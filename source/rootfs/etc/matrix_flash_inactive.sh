@@ -9,7 +9,14 @@ WORK="/tmp/matrix_fw"
 LOCKDIR="/tmp/matrix_flash.lock"
 
 
-ZYFWINFO_MODE="${ZYFWINFO_MODE:-minimal}"
+ZYFWINFO_MODE="${ZYFWINFO_MODE:-rich}"
+
+
+ZLOADER_FIX="${ZLOADER_FIX:-1}"
+OLD_ZLOADER_PATH="${OLD_ZLOADER_PATH:-/tmp/zl34.bin}"
+OLD_ZLOADER_MATCH="${OLD_ZLOADER_MATCH:-zld-2.4}"
+ZLOADER_ACTION="unknown"
+ZLOADER_CURRENT_STRING=""
 
 # NO_REBOOT=1 for testing.
 NO_REBOOT="${NO_REBOOT:-0}"
@@ -123,6 +130,60 @@ write_byte_dec() {
 	printf "\\$oct" | dd of="$file" bs=1 seek="$offset" conv=notrunc 2>/dev/null
 }
 
+write_le32_dec() {
+	local file="$1"
+	local offset="$2"
+	local value="$3"
+	local b0 b1 b2 b3
+
+	[ "$value" -ge 0 ] || fail "le32 value out of range: $value"
+
+	b0=$((value & 255))
+	b1=$(((value >> 8) & 255))
+	b2=$(((value >> 16) & 255))
+	b3=$(((value >> 24) & 255))
+
+	write_byte_dec "$file" "$offset" "$b0"
+	write_byte_dec "$file" $((offset + 1)) "$b1"
+	write_byte_dec "$file" $((offset + 2)) "$b2"
+	write_byte_dec "$file" $((offset + 3)) "$b3"
+}
+
+read_le32_dec() {
+	local file="$1"
+	local offset="$2"
+	local bytes b0 b1 b2 b3
+
+	bytes="$(dd if="$file" bs=1 skip="$offset" count=4 2>/dev/null | hexdump -v -e '1/1 "%u\n"')"
+	b0="$(echo "$bytes" | sed -n '1p')"
+	b1="$(echo "$bytes" | sed -n '2p')"
+	b2="$(echo "$bytes" | sed -n '3p')"
+	b3="$(echo "$bytes" | sed -n '4p')"
+
+	[ -n "$b0" ] && [ -n "$b1" ] && [ -n "$b2" ] && [ -n "$b3" ] || \
+		fail "could not read le32 at offset $offset from $file"
+
+	echo $((b0 + b1 * 256 + b2 * 65536 + b3 * 16777216))
+}
+
+round_up_4k_size() {
+	local size="$1"
+	echo $(( ((size + 4095) / 4096) * 4096 ))
+}
+
+calc_squashfs_load_size() {
+	local rootfs="$1"
+	local magic bytes_used load_size
+
+	magic="$(dd if="$rootfs" bs=4 count=1 2>/dev/null | hexdump -v -e '1/1 "%02x"')"
+	[ "$magic" = "68737173" ] || fail "target rootfs is not squashfs/hsqs; magic=$magic"
+
+	bytes_used="$(read_le32_dec "$rootfs" 40)"
+	load_size="$(round_up_4k_size "$bytes_used")"
+
+	echo "$load_size"
+}
+
 calc_zyfwinfo_checksum() {
 	local file="$1"
 
@@ -167,8 +228,8 @@ verify_zyfwinfo_file() {
 	calc="$(calc_zyfwinfo_checksum "$file")"
 	stored="$(read_zyfwinfo_stored_checksum "$file")"
 
-	echo "$label:"
-	hexdump -C "$file"
+	echo "$label first 1 KiB:"
+	dd if="$file" bs=1024 count=1 2>/dev/null | hexdump -C
 	echo "$label sequence: $seq"
 	echo "$label checksum calculated: 0x$(printf '%04x' "$calc")"
 	echo "$label checksum stored:     0x$(printf '%04x' "$stored")"
@@ -214,11 +275,117 @@ make_copy_oem_zyfwinfo() {
 
 	write_byte_dec "$file" 6 "$seq"
 
-	
-	# no hardcoded base like 0x0e71.
-	#  recalculated.
+	# no hardcoded base like 0x0e71; always recalculate.
 	checksum="$(write_zyfwinfo_checksum "$file")"
 	echo "$checksum"
+}
+
+make_rich_zyfwinfo() {
+	local active_zyfw="$1"
+	local file="$2"
+	local seq="$3"
+	local target_rootfs="$4"
+	local leb_size="$5"
+	local checksum magic rootfs_load_size
+
+
+	dd if="$active_zyfw" of="$file" bs="$leb_size" count=1 >/dev/null 2>&1 || \
+		fail "could not read full active zyfwinfo"
+
+	magic="$(dd if="$file" bs=4 count=1 2>/dev/null || true)"
+	[ "$magic" = "EXYZ" ] || fail "active zyfwinfo has bad magic"
+
+	# Sequence controls which bank zloader selects.
+	write_byte_dec "$file" 6 "$seq"
+
+
+	rootfs_load_size="$(calc_squashfs_load_size "$target_rootfs")"
+	write_le32_dec "$file" 120 "$rootfs_load_size"
+
+	printf "Target rootfs load size for rich zyfwinfo: 0x%08x\n" "$rootfs_load_size" >&2
+
+	# Recalculate first-0x100 zyfwinfo checksum.
+	write_byte_dec "$file" 254 0
+	write_byte_dec "$file" 255 0
+	checksum="$(write_zyfwinfo_checksum "$file")"
+	echo "$checksum"
+}
+
+inspect_zloader_for_switch() {
+	local zld_mtd="$1"
+	local current_file="/tmp/matrix_zloader_current.bin"
+	local old_string=""
+
+	ZLOADER_ACTION="keep"
+	ZLOADER_CURRENT_STRING="unknown"
+
+	dd if="/dev/mtd$zld_mtd" of="$current_file" bs=256K count=1 >/dev/null 2>&1 || \
+		fail "could not read current zloader from /dev/mtd$zld_mtd"
+
+	ZLOADER_CURRENT_STRING="$(strings "$current_file" | grep -E 'zld-[0-9]' | head -n1 || true)"
+	[ -n "$ZLOADER_CURRENT_STRING" ] || ZLOADER_CURRENT_STRING="unknown"
+
+	echo "Current zloader: $ZLOADER_CURRENT_STRING"
+
+	if echo "$ZLOADER_CURRENT_STRING" | grep -q "$OLD_ZLOADER_MATCH"; then
+		ZLOADER_ACTION="keep"
+		echo "Current sys already matches  non-verifying  pattern: $OLD_ZLOADER_MATCH"
+		return 0
+	fi
+
+	ZLOADER_ACTION="replace"
+	echo " not match $OLD_ZLOADER_MATCH; will replace it before reboot."
+
+	[ -f "$OLD_ZLOADER_PATH" ] || fail "old zloader replacement missing: $OLD_ZLOADER_PATH"
+	old_string="$(strings "$OLD_ZLOADER_PATH" | grep -E 'zld-[0-9]' | head -n1 || true)"
+	[ -n "$old_string" ] || fail "could not identify zloader string in $OLD_ZLOADER_PATH"
+	echo "Fixing...: $old_string"
+
+	echo "$old_string" | grep -q "$OLD_ZLOADER_MATCH" || \
+		fail "$OLD_ZLOADER_PATH does not look like expected old zloader ($OLD_ZLOADER_MATCH)"
+}
+
+apply_zloader_switch_if_needed() {
+	local zld_mtd="$1"
+	local zld_size check_file ro
+
+	[ "$ZLOADER_FIX" = "1" ] || {
+		echo "ZLOADER_FIX=0; not replacing loader."
+		return 0
+	}
+
+	[ "$ZLOADER_ACTION" = "replace" ] || {
+		echo " replacement not needed."
+		return 0
+	}
+
+	echo "Backing up current loader to /tmp/matrix_zloader_before_replace.bin"
+	dd if="/dev/mtd$zld_mtd" of=/tmp/matrix_zloader_before_replace.bin bs=256K count=1 >/dev/null 2>&1 || \
+		fail "could not backup"
+
+	if [ -f "/sys/class/mtd/mtd$zld_mtd/ro" ]; then
+		ro="$(cat "/sys/class/mtd/mtd$zld_mtd/ro" 2>/dev/null || echo 0)"
+		if [ "$ro" != "0" ]; then
+			echo "read-only; trying /tmp/mtd-rw.ko"
+			insmod /tmp/mtd-rw.ko i_want_a_brick=1 2>/dev/null || true
+			ro="$(cat "/sys/class/mtd/mtd$zld_mtd/ro" 2>/dev/null || echo 1)"
+			[ "$ro" = "0" ] || fail "zloader MTD is still read-only"
+		fi
+	fi
+
+	echo "Writing old zloader from $OLD_ZLOADER_PATH to /dev/mtd$zld_mtd"
+	mtd write "$OLD_ZLOADER_PATH" "/dev/mtd$zld_mtd" >/dev/null || \
+		fail "could not write old zloader"
+	sync
+
+	zld_size="$(wc -c < "$OLD_ZLOADER_PATH")"
+	check_file="/tmp/matrix_zloader_after_replace.bin"
+	dd if="/dev/mtd$zld_mtd" of="$check_file" bs="$zld_size" count=1 >/dev/null 2>&1 || \
+		fail "could not read back replaced zloader"
+
+	cmp "$OLD_ZLOADER_PATH" "$check_file" >/dev/null || fail "old zloader readback mismatch"
+	echo "OLD_ZLOADER_WRITE_OK"
+	strings "$check_file" | grep -E 'zld-[0-9]' | head -n1 || true
 }
 
 cleanup() {
@@ -233,6 +400,11 @@ need_cmd cat
 need_cmd dd
 need_cmd grep
 need_cmd hexdump
+need_cmd strings
+need_cmd mtd
+need_cmd cmp
+need_cmd sed
+need_cmd head
 need_cmd tar
 need_cmd ubinfo
 need_cmd ubiattach
@@ -243,9 +415,11 @@ need_cmd wc
 need_cmd sync
 
 echo "Matrix EX5601-T0 simple inactive-slot installer"
-echo "Boot switch method: zyfwinfo sequence only"
+echo "Boot switch method: rich zyfwinfo sequence + optional old zloader workaround"
 echo "No sys atsw / no sys seqnum / no sys atsh"
 echo "ZYFWINFO_MODE=$ZYFWINFO_MODE"
+echo "ZLOADER_FIX=$ZLOADER_FIX"
+echo "OLD_ZLOADER_PATH=$OLD_ZLOADER_PATH"
 echo "NO_REBOOT=$NO_REBOOT"
 
 [ "$(id -u)" = "0" ] || fail "must run as root"
@@ -257,11 +431,13 @@ MTD_PARENT="$(mtd_num_by_name spi0.1 || true)"
 MTD_UBI="$(mtd_num_by_name ubi || true)"
 MTD_UBI2="$(mtd_num_by_name ubi2 || true)"
 MTD_ZYUBI="$(mtd_num_by_name zyubi || true)"
+MTD_ZLOADER="$(mtd_num_by_name zloader || true)"
 
 [ -n "$MTD_PARENT" ] || fail "not OEM layout: spi0.1 parent MTD missing"
 [ -n "$MTD_UBI" ] || fail "not OEM layout: MTD named ubi missing"
 [ -n "$MTD_UBI2" ] || fail "not OEM layout: MTD named ubi2 missing"
 [ -n "$MTD_ZYUBI" ] || fail "not OEM layout: MTD named zyubi missing"
+[ -n "$MTD_ZLOADER" ] || fail "not OEM layout: MTD named zloader missing"
 
 ROOTUBI="$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^rootubi=//p' | head -n1)"
 
@@ -291,6 +467,13 @@ FW="${FW_ARG:-$DEFAULT_FW}"
 
 ACTIVE_UBI="$(find_ubi_by_mtdnum "$ACTIVE_MTD" || true)"
 [ -n "$ACTIVE_UBI" ] || fail "active UBI device not found"
+
+if [ "$ZLOADER_FIX" = "1" ]; then
+	inspect_zloader_for_switch "$MTD_ZLOADER"
+else
+	ZLOADER_ACTION="disabled"
+	echo "ZLOADER_FIX=0; zloader replacement disabled."
+fi
 
 if [ "$TARGET_MTD" = "$MTD_ZYUBI" ]; then
 	fail "refusing to touch zyubi"
@@ -392,7 +575,7 @@ done
 
 ubimkvol "$TARGET_UBI" -n 0 -N kernel -s "$KERNEL_VOL_SIZE" >/dev/null
 ubimkvol "$TARGET_UBI" -n 1 -N rootfs -s "$ROOTFS_VOL_SIZE" >/dev/null
-ubimkvol "$TARGET_UBI" -n 2 -N zyfwinfo -s 256 >/dev/null
+ubimkvol "$TARGET_UBI" -n 2 -N zyfwinfo -s "$LEB_SIZE" >/dev/null
 ubimkvol "$TARGET_UBI" -n 3 -N zydefault -s "$LEB_SIZE" >/dev/null
 ubimkvol "$TARGET_UBI" -n 4 -N rootfs_data -m >/dev/null
 
@@ -425,8 +608,11 @@ case "$ZYFWINFO_MODE" in
 	copy_oem)
 		CHECKSUM="$(make_copy_oem_zyfwinfo "$ACTIVE_ZYFW" /tmp/matrix_zyfwinfo.bin "$NEWSEQ")"
 		;;
+	rich|copy_oem_rich)
+		CHECKSUM="$(make_rich_zyfwinfo "$ACTIVE_ZYFW" /tmp/matrix_zyfwinfo.bin "$NEWSEQ" "$TARGET_ROOTFS" "$LEB_SIZE")"
+		;;
 	*)
-		fail "unsupported ZYFWINFO_MODE=$ZYFWINFO_MODE; use minimal or copy_oem"
+		fail "unsupported ZYFWINFO_MODE=$ZYFWINFO_MODE; use rich, minimal, or copy_oem"
 		;;
 esac
 
@@ -441,7 +627,7 @@ sync
 sleep 1
 
 echo "Verifying target zyfwinfo readback"
-dd if="$TARGET_ZYFW" of=/tmp/matrix_zyfwinfo_readback.bin bs=256 count=1 >/dev/null 2>&1 || \
+dd if="$TARGET_ZYFW" of=/tmp/matrix_zyfwinfo_readback.bin bs=1024 count=1 >/dev/null 2>&1 || \
 	fail "could not read target zyfwinfo"
 
 verify_zyfwinfo_file /tmp/matrix_zyfwinfo_readback.bin "$NEWSEQ" "Target zyfwinfo readback"
@@ -457,7 +643,7 @@ sync
 sleep 1
 
 echo "Final target zyfwinfo check after zydefault write"
-dd if="$TARGET_ZYFW" of=/tmp/matrix_zyfwinfo_final.bin bs=256 count=1 >/dev/null 2>&1 || \
+dd if="$TARGET_ZYFW" of=/tmp/matrix_zyfwinfo_final.bin bs=1024 count=1 >/dev/null 2>&1 || \
 	fail "could not read final target zyfwinfo"
 
 verify_zyfwinfo_file /tmp/matrix_zyfwinfo_final.bin "$NEWSEQ" "Final target zyfwinfo"
@@ -468,7 +654,7 @@ sync
 echo ""
 echo "=============================================="
 echo "Flash complete."
-echo "Boot switch method: higher zyfwinfo sequence only"
+echo "Boot switch method: rich zyfwinfo sequence + zloader compatibility"
 echo "No sys atsw was used."
 echo "Current root: $ROOTUBI"
 echo "Next target slot: $TARGET_NAME"
@@ -481,10 +667,15 @@ echo "=============================================="
 if [ "$NO_REBOOT" = "1" ]; then
 	echo "NO_REBOOT=1 set. Not rebooting."
 	echo "For V3 test, do not run sys atsh/sys seqnum before reboot."
+	echo "Zloader planned action was: $ZLOADER_ACTION"
+	echo "Zloader replacement is NOT applied when NO_REBOOT=1."
 	echo "Raw check command:"
-	echo "dd if=$TARGET_ZYFW of=/tmp/final_zyfwinfo_check.bin bs=256 count=1 2>/dev/null; hexdump -C /tmp/final_zyfwinfo_check.bin"
+	echo "dd if=$TARGET_ZYFW of=/tmp/final_zyfwinfo_check.bin bs=1024 count=1 2>/dev/null; hexdump -C /tmp/final_zyfwinfo_check.bin"
 	exit 0
 fi
+
+apply_zloader_switch_if_needed "$MTD_ZLOADER"
+sync
 
 echo "Rebooting in 3 seconds."
 sleep 3
