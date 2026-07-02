@@ -1,8 +1,8 @@
 # OpenWrt Installer for Zyxel EX5601-T0
 ## Work on Generic ACDZ and most ISP specific ACEA Firmwares
 
-**This tool install OpenWrt on the Zyxel EX5601 / T56 without UART connection.**
-The installation works from the SSH on OEM firmware, all you need is a single tar file and a script loaded into the /tmp directory.
+**This tool install OpenWrt on the Zyxel T56 /EX5601-T0, EX5601-T1 without UART connection.**
+The installation works from the SSH on OEM firmware, all you need is a single tar file and a script copied to /tmp directory.
 
 > [!WARNING]
 > Power loss during flash can brick the device.
