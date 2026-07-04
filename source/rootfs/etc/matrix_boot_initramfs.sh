@@ -48,12 +48,22 @@ NO_REBOOT="${NO_REBOOT:-0}"
 
 ZYFWINFO_MODE="${ZYFWINFO_MODE:-rich}"
 
-# non-verifying zloader before reboot. Set ZLOADER_FIX=0 to disable.
+
 ZLOADER_FIX="${ZLOADER_FIX:-1}"
 OLD_ZLOADER_PATH="${OLD_ZLOADER_PATH:-/tmp/zl34.bin}"
 OLD_ZLOADER_MATCH="${OLD_ZLOADER_MATCH:-zld-2.4}"
 ZLOADER_ACTION="unknown"
 ZLOADER_CURRENT_STRING=""
+ZLOADER_CURRENT_HASH=""
+ZLOADER_TARGET_HASH=""
+
+FIP_FIX="${FIP_FIX:-1}"
+FIP_PATH="${FIP_PATH:-/tmp/fip.bin}"
+FIP_ACTION="unknown"
+FIP_CURRENT_STRING=""
+FIP_CURRENT_HASH=""
+FIP_TARGET_STRING=""
+FIP_TARGET_HASH=""
 
 exec > "$LOG" 2>&1
 
@@ -68,6 +78,10 @@ say() {
 
 need_cmd() {
 	command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"
+}
+
+file_sha256() {
+	sha256sum "$1" | awk '{print $1}'
 }
 
 mtd_num_by_name() {
@@ -263,8 +277,8 @@ calc_rootfs_load_size_for_zyfwinfo() {
 			echo "$load_size"
 			;;
 		00000000)
-			# The initramfs stager intentionally writes an empty rootfs placeholder.
-			# With the old zloader workaround this field is not used, but keep it honest.
+
+			#  the old zloader workaround this field is not used .
 			printf "Target rootfs placeholder detected; rich zyfwinfo rootfs load size set to 0x00000000\n" >&2
 			echo 0
 			;;
@@ -317,17 +331,23 @@ verify_zyfwinfo_file() {
 	local file="$1"
 	local expected_seq="$2"
 	local label="$3"
-	local seq calc stored
+	local seq calc stored byte04 byte09 rootfs_load_size
 
 	[ -f "$file" ] || fail "$label missing: $file"
 
 	seq="$(read_byte_dec "$file" 6)"
+	byte04="$(read_byte_dec "$file" 4)"
+	byte09="$(read_byte_dec "$file" 9)"
+	rootfs_load_size="$(read_le32_dec "$file" 120)"
 	calc="$(calc_zyfwinfo_checksum "$file")"
 	stored="$(read_zyfwinfo_stored_checksum "$file")"
 
 	say "$label first 1 KiB:"
 	dd if="$file" bs=1024 count=1 2>/dev/null | hexdump -C
 	say "$label sequence: $seq"
+	say "$label format byte04: $byte04"
+	say "$label format byte09: $byte09"
+	say "$label rootfs load size field 0x78: 0x$(printf '%08x' "$rootfs_load_size")"
 	say "$label checksum calculated: 0x$(printf '%04x' "$calc")"
 	say "$label checksum stored:     0x$(printf '%04x' "$stored")"
 
@@ -366,20 +386,21 @@ make_rich_zyfwinfo() {
 	local leb_size="$5"
 	local checksum magic rootfs_load_size
 
-	# Copy the full active zyfwinfo LEB. New ACEA zloader reads at least 0x400,
-	# while old ACDZ zloader reads only 0x100, so this is compatible with both.
 	dd if="$active_zyfw" of="$file" bs="$leb_size" count=1 >/dev/null 2>&1 || \
 		fail "could not read full active zyfwinfo"
 
 	magic="$(dd if="$file" bs=4 count=1 2>/dev/null || true)"
 	[ "$magic" = "EXYZ" ] || fail "active zyfwinfo has bad magic"
 
+
+	write_byte "$file" 4 3
+	write_byte "$file" 9 4
+	say "Forced zyfwinfo rich markers: byte04=3 byte09=4"
+
 	# Sequence controls which bank zloader selects.
 	write_byte "$file" 6 "$seq"
 
-	# ACEA zloader uses the little-endian value at 0x78 as rootfs load size.
-	# For this initramfs stager the rootfs volume is normally an empty placeholder,
-	# so this becomes 0. If the target rootfs is squashfs, calculate its real size.
+
 	rootfs_load_size="$(calc_rootfs_load_size_for_zyfwinfo "$target_rootfs")"
 	write_le32_dec "$file" 120 "$rootfs_load_size"
 
@@ -395,35 +416,54 @@ make_rich_zyfwinfo() {
 inspect_zloader_for_switch() {
 	local zld_mtd="$1"
 	local current_file="$WORK/zloader.current.bin"
-	local old_string=""
+	local target_file="$OLD_ZLOADER_PATH"
+	local target_size target_string
 
 	ZLOADER_ACTION="keep"
 	ZLOADER_CURRENT_STRING="unknown"
+	ZLOADER_CURRENT_HASH=""
+	ZLOADER_TARGET_HASH=""
 
-	dd if="/dev/mtd$zld_mtd" of="$current_file" bs=256K count=1 >/dev/null 2>&1 || \
+	[ "$ZLOADER_FIX" = "1" ] || {
+		ZLOADER_ACTION="disabled"
+		say "ZLOADER_FIX=0; zloader replacement disabled."
+		return 0
+	}
+
+	[ -f "$target_file" ] || fail "zloader replacement missing: $target_file"
+
+	target_size="$(wc -c < "$target_file" | awk '{print $1}')"
+	[ "$target_size" -gt 4096 ] || fail "zloader replacement looks too small: $target_file"
+	[ "$target_size" -le 262144 ] || fail "zloader replacement is larger than 256 KiB partition: $target_size"
+
+	dd if="/dev/mtd$zld_mtd" of="$current_file" bs="$target_size" count=1 >/dev/null 2>&1 || \
 		fail "could not read current zloader from /dev/mtd$zld_mtd"
+
+	ZLOADER_CURRENT_HASH="$(file_sha256 "$current_file")"
+	ZLOADER_TARGET_HASH="$(file_sha256 "$target_file")"
 
 	ZLOADER_CURRENT_STRING="$(strings "$current_file" | grep -E 'zld-[0-9]' | head -n1 || true)"
 	[ -n "$ZLOADER_CURRENT_STRING" ] || ZLOADER_CURRENT_STRING="unknown"
 
-	say "Current zloader: $ZLOADER_CURRENT_STRING"
+	target_string="$(strings "$target_file" | grep -E 'zld-[0-9]' | head -n1 || true)"
+	[ -n "$target_string" ] || fail "could not identify zloader string in $target_file"
 
-	if echo "$ZLOADER_CURRENT_STRING" | grep -q "$OLD_ZLOADER_MATCH"; then
+	say "Current zloader:     $ZLOADER_CURRENT_STRING"
+	say "Current zloader sha: $ZLOADER_CURRENT_HASH"
+	say "Target zloader:      $target_string"
+	say "Target zloader sha:  $ZLOADER_TARGET_HASH"
+
+	# Keep this string sanity check because writing a bad zloader is fatal on no-UART devices.
+	echo "$target_string" | grep -q "$OLD_ZLOADER_MATCH" || \
+		fail "$target_file does not look like expected old zloader ($OLD_ZLOADER_MATCH)"
+
+	if [ "$ZLOADER_CURRENT_HASH" = "$ZLOADER_TARGET_HASH" ]; then
 		ZLOADER_ACTION="keep"
-		say "Current zloader already matches old non-verifying loader pattern: $OLD_ZLOADER_MATCH"
-		return 0
+		say "Current zloader already matches $target_file; no zloader replacement needed."
+	else
+		ZLOADER_ACTION="replace"
+		say "Current zloader hash differs from $target_file; will replace zloader before reboot."
 	fi
-
-	ZLOADER_ACTION="replace"
-	say "Current zloader does not match $OLD_ZLOADER_MATCH; will replace it before reboot."
-
-	[ -f "$OLD_ZLOADER_PATH" ] || fail "old zloader replacement missing: $OLD_ZLOADER_PATH"
-	old_string="$(strings "$OLD_ZLOADER_PATH" | grep -E 'zld-[0-9]' | head -n1 || true)"
-	[ -n "$old_string" ] || fail "could not identify zloader string in $OLD_ZLOADER_PATH"
-	say "Replacement zloader: $old_string"
-
-	echo "$old_string" | grep -q "$OLD_ZLOADER_MATCH" || \
-		fail "$OLD_ZLOADER_PATH does not look like expected old zloader ($OLD_ZLOADER_MATCH)"
 }
 
 apply_zloader_switch_if_needed() {
@@ -459,7 +499,7 @@ apply_zloader_switch_if_needed() {
 		fail "could not write old zloader"
 	sync
 
-	zld_size="$(wc -c < "$OLD_ZLOADER_PATH")"
+	zld_size="$(wc -c < "$OLD_ZLOADER_PATH" | awk '{print $1}')"
 	check_file="$WORK/zloader.after_replace.bin"
 	dd if="/dev/mtd$zld_mtd" of="$check_file" bs="$zld_size" count=1 >/dev/null 2>&1 || \
 		fail "could not read back replaced zloader"
@@ -467,6 +507,136 @@ apply_zloader_switch_if_needed() {
 	cmp "$OLD_ZLOADER_PATH" "$check_file" >/dev/null || fail "old zloader readback mismatch"
 	say "OLD_ZLOADER_WRITE_OK"
 	strings "$check_file" | grep -E 'zld-[0-9]' | head -n1 || true
+}
+
+inspect_fip_for_switch() {
+	local fip_mtd="$1"
+	local current_file="$WORK/fip.current.bin"
+	local target_file="$FIP_PATH"
+	local target_size
+
+	FIP_ACTION="keep"
+	FIP_CURRENT_STRING="unknown"
+	FIP_TARGET_STRING="unknown"
+	FIP_CURRENT_HASH=""
+	FIP_TARGET_HASH=""
+
+	[ "$FIP_FIX" = "1" ] || {
+		FIP_ACTION="disabled"
+		say "FIP_FIX=0; FIP replacement disabled."
+		return 0
+	}
+
+	if [ ! -f "$target_file" ]; then
+		FIP_ACTION="missing"
+		say "WARNING: FIP replacement missing: $target_file"
+		say "WARNING: continuing without FIP replacement."
+		return 0
+	fi
+
+	target_size="$(wc -c < "$target_file" | awk '{print $1}')"
+	if [ "$target_size" -le 1048576 ]; then
+		FIP_ACTION="invalid"
+		say "WARNING: FIP replacement looks too small: $target_file ($target_size bytes)"
+		say "WARNING: continuing without FIP replacement."
+		return 0
+	fi
+	if [ "$target_size" -gt 2097152 ]; then
+		FIP_ACTION="invalid"
+		say "WARNING: FIP replacement is larger than expected 2 MiB partition: $target_size"
+		say "WARNING: continuing without FIP replacement."
+		return 0
+	fi
+
+	dd if="/dev/mtd$fip_mtd" of="$current_file" bs="$target_size" count=1 >/dev/null 2>&1 || {
+		FIP_ACTION="read_failed"
+		say "WARNING: could not read current FIP from /dev/mtd$fip_mtd"
+		say "WARNING: continuing without FIP replacement."
+		return 0
+	}
+
+	FIP_CURRENT_HASH="$(file_sha256 "$current_file")"
+	FIP_TARGET_HASH="$(file_sha256 "$target_file")"
+
+	FIP_CURRENT_STRING="$(strings "$current_file" | grep -Ei 'U-Boot 20|v2\\.6\\(release\\)|Built :' | head -n1 || true)"
+	[ -n "$FIP_CURRENT_STRING" ] || FIP_CURRENT_STRING="unknown"
+	FIP_TARGET_STRING="$(strings "$target_file" | grep -Ei 'U-Boot 20|v2\\.6\\(release\\)|Built :' | head -n1 || true)"
+	[ -n "$FIP_TARGET_STRING" ] || FIP_TARGET_STRING="unknown"
+
+	say "Current FIP hint:     $FIP_CURRENT_STRING"
+	say "Current FIP sha:      $FIP_CURRENT_HASH"
+	say "Target FIP hint:      $FIP_TARGET_STRING"
+	say "Target FIP sha:       $FIP_TARGET_HASH"
+
+	if [ "$FIP_CURRENT_HASH" = "$FIP_TARGET_HASH" ]; then
+		FIP_ACTION="keep"
+		say "Current FIP already matches $target_file; no FIP replacement needed."
+	else
+		FIP_ACTION="replace"
+		say "Current FIP hash differs from $target_file; will try to replace FIP before reboot."
+		say "If FIP replacement fails cleanly, the script will continue."
+	fi
+}
+
+apply_fip_switch_if_needed() {
+	local fip_mtd="$1"
+	local target_size check_file before_file after_fail_file ro
+
+	[ "$FIP_FIX" = "1" ] || {
+		say "FIP_FIX=0; not replacing FIP."
+		return 0
+	}
+
+	[ "$FIP_ACTION" = "replace" ] || {
+		say "FIP replacement not needed. action=$FIP_ACTION"
+		return 0
+	}
+
+	target_size="$(wc -c < "$FIP_PATH" | awk '{print $1}')"
+	before_file="$WORK/fip.before_replace.bin"
+	check_file="$WORK/fip.after_replace.bin"
+	after_fail_file="$WORK/fip.after_failed_replace.bin"
+
+	say "Backing up current FIP exact replacement-size region to $before_file"
+	dd if="/dev/mtd$fip_mtd" of="$before_file" bs="$target_size" count=1 >/dev/null 2>&1 || {
+		say "WARNING: could not backup current FIP; skipping FIP replacement."
+		FIP_ACTION="backup_failed"
+		return 0
+	}
+
+	if [ -f "/sys/class/mtd/mtd$fip_mtd/ro" ]; then
+		ro="$(cat "/sys/class/mtd/mtd$fip_mtd/ro" 2>/dev/null || echo 0)"
+		if [ "$ro" != "0" ]; then
+			say "FIP MTD is read-only; trying /tmp/mtd-rw.ko"
+			insmod /tmp/mtd-rw.ko i_want_a_brick=1 2>/dev/null || true
+		fi
+	fi
+
+	say "Trying to write FIP from $FIP_PATH to /dev/mtd$fip_mtd"
+	if ! mtd write "$FIP_PATH" "/dev/mtd$fip_mtd" >/dev/null 2>&1; then
+		say "WARNING: FIP write command failed. Checking whether current FIP stayed unchanged."
+		dd if="/dev/mtd$fip_mtd" of="$after_fail_file" bs="$target_size" count=1 >/dev/null 2>&1 || \
+			fail "FIP write failed and FIP readback also failed; refusing to continue"
+		if cmp "$before_file" "$after_fail_file" >/dev/null; then
+			say "FIP unchanged after failed write; continuing without FIP replacement."
+			FIP_ACTION="write_failed_unchanged"
+			return 0
+		fi
+		fail "FIP changed during failed write; refusing to continue"
+	fi
+
+	sync
+
+	dd if="/dev/mtd$fip_mtd" of="$check_file" bs="$target_size" count=1 >/dev/null 2>&1 || \
+		fail "FIP write reported success but readback failed"
+
+	if cmp "$FIP_PATH" "$check_file" >/dev/null; then
+		say "FIP_WRITE_OK"
+		FIP_ACTION="replaced"
+		return 0
+	fi
+
+	fail "FIP write reported success but readback mismatch; refusing to reboot"
 }
 
 inspect_initramfs_strings() {
@@ -763,6 +933,8 @@ say "No sys atsw / no sys seqnum / no sys atsh"
 say "ZYFWINFO_MODE=$ZYFWINFO_MODE"
 say "ZLOADER_FIX=$ZLOADER_FIX"
 say "OLD_ZLOADER_PATH=$OLD_ZLOADER_PATH"
+say "FIP_FIX=$FIP_FIX"
+say "FIP_PATH=$FIP_PATH"
 say "NO_REBOOT=$NO_REBOOT"
 say "INITRAMFS=$INITRAMFS"
 say "LOG=$LOG"
@@ -776,6 +948,7 @@ need_cmd dd
 need_cmd grep
 need_cmd hexdump
 need_cmd strings
+need_cmd sha256sum
 need_cmd mtd
 need_cmd cmp
 need_cmd sed
@@ -823,12 +996,14 @@ MTD_UBI="$(mtd_num_by_name ubi || true)"
 MTD_UBI2="$(mtd_num_by_name ubi2 || true)"
 MTD_ZYUBI="$(mtd_num_by_name zyubi || true)"
 MTD_ZLOADER="$(mtd_num_by_name zloader || true)"
+MTD_FIP="$(mtd_num_by_name FIP || true)"
 
 [ -n "$MTD_PARENT" ] || fail "not OEM stock layout: parent mtd named spi0.1 missing"
 [ -n "$MTD_UBI" ] || fail "not OEM stock layout: mtd named ubi missing"
 [ -n "$MTD_UBI2" ] || fail "not OEM stock layout: mtd named ubi2 missing"
 [ -n "$MTD_ZYUBI" ] || fail "not OEM stock layout: mtd named zyubi missing"
 [ -n "$MTD_ZLOADER" ] || fail "not OEM stock layout: mtd named zloader missing"
+[ -n "$MTD_FIP" ] || fail "not OEM stock layout: mtd named FIP/fip missing"
 
 CMDLINE="$(cat /proc/cmdline)"
 say "$CMDLINE"
@@ -856,6 +1031,7 @@ say "MTD_PARENT=mtd$MTD_PARENT"
 say "MTD_UBI=mtd$MTD_UBI"
 say "MTD_UBI2=mtd$MTD_UBI2"
 say "MTD_ZYUBI=mtd$MTD_ZYUBI"
+say "MTD_FIP=mtd$MTD_FIP"
 say "MTD_ZLOADER=mtd$MTD_ZLOADER"
 say "ACTIVE_MTD=mtd$ACTIVE_MTD"
 say "TARGET_MTD=mtd$TARGET_MTD"
@@ -875,12 +1051,8 @@ say "ACTIVE_ZYFW=$ACTIVE_ZYFW"
 rm -rf "$WORK"
 mkdir -p "$WORK"
 
-if [ "$ZLOADER_FIX" = "1" ]; then
-	inspect_zloader_for_switch "$MTD_ZLOADER"
-else
-	ZLOADER_ACTION="disabled"
-	say "ZLOADER_FIX=0; zloader replacement disabled."
-fi
+inspect_fip_for_switch "$MTD_FIP"
+inspect_zloader_for_switch "$MTD_ZLOADER"
 
 dd if="$ACTIVE_ZYFW" of="$WORK/zyfwinfo.active.bin" bs=256 count=1 >/dev/null 2>&1 || \
 	fail "could not read active zyfwinfo"
@@ -1037,10 +1209,14 @@ say "Target bank: mtd$TARGET_MTD / $TARGET_NAME"
 say "New zyfwinfo sequence: $ACTIVE_SEQ -> $NEW_SEQ"
 say "New zyfwinfo mode: $ZYFWINFO_MODE"
 say "New zyfwinfo checksum: 0x$(printf '%04x' "$CHECKSUM")"
+say "fip action: $FIP_ACTION"
+say "fip current sha: ${FIP_CURRENT_HASH:-unknown}"
+say "fip target sha:  ${FIP_TARGET_HASH:-unknown}"
 say "zloader action: $ZLOADER_ACTION"
 say "zloader before: $ZLOADER_CURRENT_STRING"
+say "zloader current sha: ${ZLOADER_CURRENT_HASH:-unknown}"
+say "zloader target sha:  ${ZLOADER_TARGET_HASH:-unknown}"
 say "No ubootmod NAND conversion was done."
-say "No FIP was written."
 say "Log: $LOG"
 say "Please wait for two minutes before accessing router at 192.168.1.1"
 say "=============================================="
@@ -1048,8 +1224,9 @@ say "=============================================="
 if [ "$NO_REBOOT" = "1" ]; then
 	say "NO_REBOOT=1 set. Not rebooting."
 	say "Do not run sys atsh/sys seqnum before reboot."
+	say "FIP planned action was: $FIP_ACTION"
 	say "Zloader planned action was: $ZLOADER_ACTION"
-	say "Zloader replacement is NOT applied when NO_REBOOT=1."
+	say "FIP/zloader replacement is NOT applied when NO_REBOOT=1."
 	say "Manual raw check:"
 	say "dd if=$TARGET_ZYFW of=/tmp/initramfs_final_zyfwinfo_check.bin bs=1024 count=1 2>/dev/null; hexdump -C /tmp/initramfs_final_zyfwinfo_check.bin"
 	say "You can also run read-only diagnosis:"
@@ -1057,6 +1234,7 @@ if [ "$NO_REBOOT" = "1" ]; then
 	exit 0
 fi
 
+apply_fip_switch_if_needed "$MTD_FIP"
 apply_zloader_switch_if_needed "$MTD_ZLOADER"
 sync
 

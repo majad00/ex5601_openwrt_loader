@@ -1,6 +1,6 @@
 #!/bin/sh
 #written by majad.qureshi at lut.fi
-# Modified universal boot-switch version for EX5601-T0 OEM V3.x / V4.x 
+# Modified universal boot-switch version for EX5601-T0 OEM V3.x / V4.x  and  ACEA ACQQ or ACID firmwares
 
 set -eu
 
@@ -12,11 +12,23 @@ LOCKDIR="/tmp/matrix_flash.lock"
 ZYFWINFO_MODE="${ZYFWINFO_MODE:-rich}"
 
 
+
+FIP_FIX="${FIP_FIX:-1}"
+FIP_PATH="${FIP_PATH:-/tmp/fip.bin}"
+FIP_ACTION="unknown"
+FIP_CURRENT_SHA="unknown"
+FIP_TARGET_SHA="unknown"
+FIP_CURRENT_STRING="unknown"
+FIP_TARGET_STRING="unknown"
+
+
 ZLOADER_FIX="${ZLOADER_FIX:-1}"
 OLD_ZLOADER_PATH="${OLD_ZLOADER_PATH:-/tmp/zl34.bin}"
-OLD_ZLOADER_MATCH="${OLD_ZLOADER_MATCH:-zld-2.4}"
 ZLOADER_ACTION="unknown"
-ZLOADER_CURRENT_STRING=""
+ZLOADER_CURRENT_STRING="unknown"
+ZLOADER_TARGET_STRING="unknown"
+ZLOADER_CURRENT_SHA="unknown"
+ZLOADER_TARGET_SHA="unknown"
 
 # NO_REBOOT=1 for testing.
 NO_REBOOT="${NO_REBOOT:-0}"
@@ -29,6 +41,11 @@ fail() {
 need_cmd() {
 	command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"
 }
+
+sha256_file() {
+	sha256sum "$1" | awk '{print $1}'
+}
+
 
 mtd_num_by_name() {
 	local name="$1"
@@ -220,17 +237,23 @@ verify_zyfwinfo_file() {
 	local file="$1"
 	local expected_seq="$2"
 	local label="$3"
-	local seq calc stored
+	local seq calc stored byte04 byte09 rootfs_load_size
 
 	[ -f "$file" ] || fail "$label missing: $file"
 
 	seq="$(read_byte_dec "$file" 6)"
+	byte04="$(read_byte_dec "$file" 4)"
+	byte09="$(read_byte_dec "$file" 9)"
+	rootfs_load_size="$(read_le32_dec "$file" 120)"
 	calc="$(calc_zyfwinfo_checksum "$file")"
 	stored="$(read_zyfwinfo_stored_checksum "$file")"
 
 	echo "$label first 1 KiB:"
 	dd if="$file" bs=1024 count=1 2>/dev/null | hexdump -C
 	echo "$label sequence: $seq"
+	echo "$label format byte04: $byte04"
+	echo "$label format byte09: $byte09"
+	printf "%s rootfs load size field 0x78: 0x%08x\n" "$label" "$rootfs_load_size"
 	echo "$label checksum calculated: 0x$(printf '%04x' "$calc")"
 	echo "$label checksum stored:     0x$(printf '%04x' "$stored")"
 
@@ -288,16 +311,19 @@ make_rich_zyfwinfo() {
 	local leb_size="$5"
 	local checksum magic rootfs_load_size
 
-
 	dd if="$active_zyfw" of="$file" bs="$leb_size" count=1 >/dev/null 2>&1 || \
 		fail "could not read full active zyfwinfo"
 
 	magic="$(dd if="$file" bs=4 count=1 2>/dev/null || true)"
 	[ "$magic" = "EXYZ" ] || fail "active zyfwinfo has bad magic"
 
+
+	write_byte_dec "$file" 4 3
+	write_byte_dec "$file" 9 4
+	echo "Forced zyfwinfo rich markers: byte04=3 byte09=4" >&2
+
 	# Sequence controls which bank zloader selects.
 	write_byte_dec "$file" 6 "$seq"
-
 
 	rootfs_load_size="$(calc_squashfs_load_size "$target_rootfs")"
 	write_le32_dec "$file" 120 "$rootfs_load_size"
@@ -311,38 +337,181 @@ make_rich_zyfwinfo() {
 	echo "$checksum"
 }
 
-inspect_zloader_for_switch() {
-	local zld_mtd="$1"
-	local current_file="/tmp/matrix_zloader_current.bin"
-	local old_string=""
+inspect_fip_for_switch() {
+	local fip_mtd="$1"
+	local current_file="/tmp/matrix_fip_current.bin"
+	local target_size mtd_size
 
-	ZLOADER_ACTION="keep"
-	ZLOADER_CURRENT_STRING="unknown"
+	FIP_ACTION="keep"
+	FIP_CURRENT_SHA="unknown"
+	FIP_TARGET_SHA="unknown"
+	FIP_CURRENT_STRING="unknown"
+	FIP_TARGET_STRING="unknown"
 
-	dd if="/dev/mtd$zld_mtd" of="$current_file" bs=256K count=1 >/dev/null 2>&1 || \
-		fail "could not read current zloader from /dev/mtd$zld_mtd"
+	[ "$FIP_FIX" = "1" ] || {
+		FIP_ACTION="disabled"
+		echo "FIP_FIX=0; FIP replacement disabled."
+		return 0
+	}
 
-	ZLOADER_CURRENT_STRING="$(strings "$current_file" | grep -E 'zld-[0-9]' | head -n1 || true)"
-	[ -n "$ZLOADER_CURRENT_STRING" ] || ZLOADER_CURRENT_STRING="unknown"
-
-	echo "Current zloader: $ZLOADER_CURRENT_STRING"
-
-	if echo "$ZLOADER_CURRENT_STRING" | grep -q "$OLD_ZLOADER_MATCH"; then
-		ZLOADER_ACTION="keep"
-		echo "Current sys already matches  non-verifying  pattern: $OLD_ZLOADER_MATCH"
+	if [ ! -f "$FIP_PATH" ]; then
+		FIP_ACTION="missing"
+		echo "WARNING: FIP replacement missing: $FIP_PATH"
+		echo "WARNING: continuing without FIP replacement."
 		return 0
 	fi
 
-	ZLOADER_ACTION="replace"
-	echo " not match $OLD_ZLOADER_MATCH; will replace it before reboot."
+	target_size="$(wc -c < "$FIP_PATH" | awk '{print $1}')"
+	mtd_size="$(cat "/sys/class/mtd/mtd$fip_mtd/size" 2>/dev/null || echo 0)"
 
-	[ -f "$OLD_ZLOADER_PATH" ] || fail "old zloader replacement missing: $OLD_ZLOADER_PATH"
-	old_string="$(strings "$OLD_ZLOADER_PATH" | grep -E 'zld-[0-9]' | head -n1 || true)"
-	[ -n "$old_string" ] || fail "could not identify zloader string in $OLD_ZLOADER_PATH"
-	echo "Fixing...: $old_string"
+	if [ "$mtd_size" -gt 0 ] && [ "$target_size" -gt "$mtd_size" ]; then
+		FIP_ACTION="too_large"
+		FIP_TARGET_SHA="$(sha256_file "$FIP_PATH")"
+		echo "WARNING: target FIP is larger than /dev/mtd$fip_mtd: target=$target_size mtd=$mtd_size"
+		echo "WARNING: continuing without FIP replacement."
+		return 0
+	fi
 
-	echo "$old_string" | grep -q "$OLD_ZLOADER_MATCH" || \
-		fail "$OLD_ZLOADER_PATH does not look like expected old zloader ($OLD_ZLOADER_MATCH)"
+	dd if="/dev/mtd$fip_mtd" of="$current_file" bs="$target_size" count=1 >/dev/null 2>&1 || {
+		FIP_ACTION="read_failed"
+		echo "WARNING: could not read current FIP from /dev/mtd$fip_mtd"
+		echo "WARNING: continuing without FIP replacement."
+		return 0
+	}
+
+	FIP_CURRENT_SHA="$(sha256_file "$current_file")"
+	FIP_TARGET_SHA="$(sha256_file "$FIP_PATH")"
+	FIP_CURRENT_STRING="$(strings "$current_file" | grep -Ei 'U-Boot [0-9]|v[0-9][.][0-9].*release|BL31' | head -n1 || true)"
+	FIP_TARGET_STRING="$(strings "$FIP_PATH" | grep -Ei 'U-Boot [0-9]|v[0-9][.][0-9].*release|BL31' | head -n1 || true)"
+	[ -n "$FIP_CURRENT_STRING" ] || FIP_CURRENT_STRING="unknown"
+	[ -n "$FIP_TARGET_STRING" ] || FIP_TARGET_STRING="unknown"
+
+	echo "Current FIP:        $FIP_CURRENT_STRING"
+	echo "Current FIP sha:    $FIP_CURRENT_SHA"
+	echo "Target FIP:         $FIP_TARGET_STRING"
+	echo "Target FIP sha:     $FIP_TARGET_SHA"
+
+	if [ "$FIP_CURRENT_SHA" = "$FIP_TARGET_SHA" ]; then
+		FIP_ACTION="keep"
+		echo "Current FIP already matches $FIP_PATH; no FIP replacement needed."
+	else
+		FIP_ACTION="replace"
+		echo "Current FIP differs from $FIP_PATH; will try to replace it before reboot."
+		echo "If FIP replacement fails cleanly, the script will continue."
+	fi
+}
+
+apply_fip_switch_if_needed() {
+	local fip_mtd="$1"
+	local target_size check_file before_file after_fail_file ro
+
+	[ "$FIP_FIX" = "1" ] || {
+		echo "FIP_FIX=0; not replacing FIP."
+		return 0
+	}
+
+	[ "$FIP_ACTION" = "replace" ] || {
+		echo "FIP replacement not needed. action=$FIP_ACTION"
+		return 0
+	}
+
+	target_size="$(wc -c < "$FIP_PATH" | awk '{print $1}')"
+	before_file="/tmp/matrix_fip_before_replace.bin"
+	check_file="/tmp/matrix_fip_after_replace.bin"
+	after_fail_file="/tmp/matrix_fip_after_failed_replace.bin"
+
+	echo "Backing up current FIP to $before_file"
+	dd if="/dev/mtd$fip_mtd" of="$before_file" bs="$target_size" count=1 >/dev/null 2>&1 || {
+		echo "WARNING: could not backup current FIP; continuing without FIP replacement."
+		FIP_ACTION="backup_failed"
+		return 0
+	}
+
+	if [ -f "/sys/class/mtd/mtd$fip_mtd/ro" ]; then
+		ro="$(cat "/sys/class/mtd/mtd$fip_mtd/ro" 2>/dev/null || echo 0)"
+		if [ "$ro" != "0" ]; then
+			echo "FIP MTD is read-only; trying /tmp/mtd-rw.ko"
+			insmod /tmp/mtd-rw.ko i_want_a_brick=1 2>/dev/null || true
+		fi
+	fi
+
+	echo "Writing replacement FIP from $FIP_PATH to /dev/mtd$fip_mtd"
+	if ! mtd write "$FIP_PATH" "/dev/mtd$fip_mtd" >/dev/null 2>&1; then
+		echo "WARNING: FIP write failed. Checking whether current FIP was left unchanged."
+		dd if="/dev/mtd$fip_mtd" of="$after_fail_file" bs="$target_size" count=1 >/dev/null 2>&1 || \
+			fail "FIP write failed and could not verify post-failure state"
+
+		if cmp "$before_file" "$after_fail_file" >/dev/null; then
+			echo "WARNING: FIP appears unchanged after failed write; continuing."
+			FIP_ACTION="write_failed_unchanged"
+			return 0
+		fi
+
+		fail "FIP write failed and FIP contents changed; refusing to reboot"
+	fi
+
+	sync
+
+	dd if="/dev/mtd$fip_mtd" of="$check_file" bs="$target_size" count=1 >/dev/null 2>&1 || \
+		fail "could not read back replaced FIP"
+
+	if cmp "$FIP_PATH" "$check_file" >/dev/null; then
+		echo "FIP_WRITE_OK"
+		FIP_ACTION="replaced"
+		FIP_CURRENT_SHA="$(sha256_file "$check_file")"
+		strings "$check_file" | grep -Ei 'U-Boot [0-9]|v[0-9][.][0-9].*release|BL31' | head -n3 || true
+	else
+		fail "FIP readback mismatch after write; refusing to reboot"
+	fi
+}
+
+inspect_zloader_for_switch() {
+	local zld_mtd="$1"
+	local current_file="/tmp/matrix_zloader_current.bin"
+	local target_size mtd_size
+
+	ZLOADER_ACTION="keep"
+	ZLOADER_CURRENT_STRING="unknown"
+	ZLOADER_TARGET_STRING="unknown"
+	ZLOADER_CURRENT_SHA="unknown"
+	ZLOADER_TARGET_SHA="unknown"
+
+	[ "$ZLOADER_FIX" = "1" ] || {
+		ZLOADER_ACTION="disabled"
+		echo "ZLOADER_FIX=0; zloader replacement disabled."
+		return 0
+	}
+
+	[ -f "$OLD_ZLOADER_PATH" ] || fail "zloader replacement missing: $OLD_ZLOADER_PATH"
+
+	target_size="$(wc -c < "$OLD_ZLOADER_PATH" | awk '{print $1}')"
+	mtd_size="$(cat "/sys/class/mtd/mtd$zld_mtd/size" 2>/dev/null || echo 0)"
+
+	[ "$mtd_size" -eq 0 ] || [ "$target_size" -le "$mtd_size" ] || \
+		fail "target zloader is larger than /dev/mtd$zld_mtd: target=$target_size mtd=$mtd_size"
+
+	dd if="/dev/mtd$zld_mtd" of="$current_file" bs="$target_size" count=1 >/dev/null 2>&1 || \
+		fail "could not read current zloader from /dev/mtd$zld_mtd"
+
+	ZLOADER_CURRENT_SHA="$(sha256_file "$current_file")"
+	ZLOADER_TARGET_SHA="$(sha256_file "$OLD_ZLOADER_PATH")"
+	ZLOADER_CURRENT_STRING="$(strings "$current_file" | grep -E 'zld-[0-9]' | head -n1 || true)"
+	ZLOADER_TARGET_STRING="$(strings "$OLD_ZLOADER_PATH" | grep -E 'zld-[0-9]' | head -n1 || true)"
+	[ -n "$ZLOADER_CURRENT_STRING" ] || ZLOADER_CURRENT_STRING="unknown"
+	[ -n "$ZLOADER_TARGET_STRING" ] || ZLOADER_TARGET_STRING="unknown"
+
+	echo "Current zloader:     $ZLOADER_CURRENT_STRING"
+	echo "Current zloader sha: $ZLOADER_CURRENT_SHA"
+	echo "Target zloader:      $ZLOADER_TARGET_STRING"
+	echo "Target zloader sha:  $ZLOADER_TARGET_SHA"
+
+	if [ "$ZLOADER_CURRENT_SHA" = "$ZLOADER_TARGET_SHA" ]; then
+		ZLOADER_ACTION="keep"
+		echo "Current zloader already matches $OLD_ZLOADER_PATH; no zloader replacement needed."
+	else
+		ZLOADER_ACTION="replace"
+		echo "Current zloader differs from $OLD_ZLOADER_PATH; will replace it before reboot."
+	fi
 }
 
 apply_zloader_switch_if_needed() {
@@ -350,32 +519,32 @@ apply_zloader_switch_if_needed() {
 	local zld_size check_file ro
 
 	[ "$ZLOADER_FIX" = "1" ] || {
-		echo "ZLOADER_FIX=0; not replacing loader."
+		echo "ZLOADER_FIX=0; not replacing zloader."
 		return 0
 	}
 
 	[ "$ZLOADER_ACTION" = "replace" ] || {
-		echo " replacement not needed."
+		echo "Zloader replacement not needed."
 		return 0
 	}
 
-	echo "Backing up current loader to /tmp/matrix_zloader_before_replace.bin"
+	echo "Backing up current zloader to /tmp/matrix_zloader_before_replace.bin"
 	dd if="/dev/mtd$zld_mtd" of=/tmp/matrix_zloader_before_replace.bin bs=256K count=1 >/dev/null 2>&1 || \
-		fail "could not backup"
+		fail "could not backup current zloader"
 
 	if [ -f "/sys/class/mtd/mtd$zld_mtd/ro" ]; then
 		ro="$(cat "/sys/class/mtd/mtd$zld_mtd/ro" 2>/dev/null || echo 0)"
 		if [ "$ro" != "0" ]; then
-			echo "read-only; trying /tmp/mtd-rw.ko"
+			echo "zloader MTD is read-only; trying /tmp/mtd-rw.ko"
 			insmod /tmp/mtd-rw.ko i_want_a_brick=1 2>/dev/null || true
 			ro="$(cat "/sys/class/mtd/mtd$zld_mtd/ro" 2>/dev/null || echo 1)"
 			[ "$ro" = "0" ] || fail "zloader MTD is still read-only"
 		fi
 	fi
 
-	echo "Writing old zloader from $OLD_ZLOADER_PATH to /dev/mtd$zld_mtd"
+	echo "Writing replacement zloader from $OLD_ZLOADER_PATH to /dev/mtd$zld_mtd"
 	mtd write "$OLD_ZLOADER_PATH" "/dev/mtd$zld_mtd" >/dev/null || \
-		fail "could not write old zloader"
+		fail "could not write replacement zloader"
 	sync
 
 	zld_size="$(wc -c < "$OLD_ZLOADER_PATH")"
@@ -383,10 +552,13 @@ apply_zloader_switch_if_needed() {
 	dd if="/dev/mtd$zld_mtd" of="$check_file" bs="$zld_size" count=1 >/dev/null 2>&1 || \
 		fail "could not read back replaced zloader"
 
-	cmp "$OLD_ZLOADER_PATH" "$check_file" >/dev/null || fail "old zloader readback mismatch"
-	echo "OLD_ZLOADER_WRITE_OK"
+	cmp "$OLD_ZLOADER_PATH" "$check_file" >/dev/null || fail "replacement zloader readback mismatch"
+	ZLOADER_CURRENT_SHA="$(sha256_file "$check_file")"
+	ZLOADER_ACTION="replaced"
+	echo "ZLOADER_WRITE_OK"
 	strings "$check_file" | grep -E 'zld-[0-9]' | head -n1 || true
 }
+
 
 cleanup() {
 	rm -rf "$LOCKDIR"
@@ -413,11 +585,14 @@ need_cmd ubirmvol
 need_cmd ubiupdatevol
 need_cmd wc
 need_cmd sync
+need_cmd sha256sum
 
 echo "Matrix EX5601-T0 simple inactive-slot installer"
 echo "Boot switch method: rich zyfwinfo sequence + optional old zloader workaround"
 echo "No sys atsw / no sys seqnum / no sys atsh"
 echo "ZYFWINFO_MODE=$ZYFWINFO_MODE"
+echo "FIP_FIX=$FIP_FIX"
+echo "FIP_PATH=$FIP_PATH"
 echo "ZLOADER_FIX=$ZLOADER_FIX"
 echo "OLD_ZLOADER_PATH=$OLD_ZLOADER_PATH"
 echo "NO_REBOOT=$NO_REBOOT"
@@ -431,12 +606,14 @@ MTD_PARENT="$(mtd_num_by_name spi0.1 || true)"
 MTD_UBI="$(mtd_num_by_name ubi || true)"
 MTD_UBI2="$(mtd_num_by_name ubi2 || true)"
 MTD_ZYUBI="$(mtd_num_by_name zyubi || true)"
+MTD_FIP="$(mtd_num_by_name FIP || true)"
 MTD_ZLOADER="$(mtd_num_by_name zloader || true)"
 
 [ -n "$MTD_PARENT" ] || fail "not OEM layout: spi0.1 parent MTD missing"
 [ -n "$MTD_UBI" ] || fail "not OEM layout: MTD named ubi missing"
 [ -n "$MTD_UBI2" ] || fail "not OEM layout: MTD named ubi2 missing"
 [ -n "$MTD_ZYUBI" ] || fail "not OEM layout: MTD named zyubi missing"
+[ -n "$MTD_FIP" ] || fail "not OEM layout: MTD named FIP/fip missing"
 [ -n "$MTD_ZLOADER" ] || fail "not OEM layout: MTD named zloader missing"
 
 ROOTUBI="$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^rootubi=//p' | head -n1)"
@@ -468,12 +645,9 @@ FW="${FW_ARG:-$DEFAULT_FW}"
 ACTIVE_UBI="$(find_ubi_by_mtdnum "$ACTIVE_MTD" || true)"
 [ -n "$ACTIVE_UBI" ] || fail "active UBI device not found"
 
-if [ "$ZLOADER_FIX" = "1" ]; then
-	inspect_zloader_for_switch "$MTD_ZLOADER"
-else
-	ZLOADER_ACTION="disabled"
-	echo "ZLOADER_FIX=0; zloader replacement disabled."
-fi
+inspect_fip_for_switch "$MTD_FIP"
+
+inspect_zloader_for_switch "$MTD_ZLOADER"
 
 if [ "$TARGET_MTD" = "$MTD_ZYUBI" ]; then
 	fail "refusing to touch zyubi"
@@ -488,6 +662,8 @@ echo "Active MTD: mtd$ACTIVE_MTD"
 echo "Active UBI: $ACTIVE_UBI"
 echo "Target slot: $TARGET_NAME"
 echo "Target MTD: mtd$TARGET_MTD"
+echo "FIP MTD: mtd$MTD_FIP"
+echo "Zloader MTD: mtd$MTD_ZLOADER"
 echo "Firmware: $FW"
 
 rm -rf "$WORK"
@@ -662,18 +838,28 @@ echo "Target MTD: mtd$TARGET_MTD"
 echo "zyfwinfo sequence: $ACTIVE_SEQ -> $NEWSEQ"
 echo "zyfwinfo mode: $ZYFWINFO_MODE"
 echo "zyfwinfo checksum: 0x$(printf '%04x' "$CHECKSUM")"
+echo "fip action: $FIP_ACTION"
+echo "fip current sha: $FIP_CURRENT_SHA"
+echo "fip target sha:  $FIP_TARGET_SHA"
+echo "zloader action: $ZLOADER_ACTION"
+echo "zloader before: $ZLOADER_CURRENT_STRING"
+echo "zloader current sha: $ZLOADER_CURRENT_SHA"
+echo "zloader target sha:  $ZLOADER_TARGET_SHA"
 echo "=============================================="
 
 if [ "$NO_REBOOT" = "1" ]; then
 	echo "NO_REBOOT=1 set. Not rebooting."
 	echo "For V3 test, do not run sys atsh/sys seqnum before reboot."
+	echo "FIP planned action was: $FIP_ACTION"
 	echo "Zloader planned action was: $ZLOADER_ACTION"
+	echo "FIP replacement is NOT applied when NO_REBOOT=1."
 	echo "Zloader replacement is NOT applied when NO_REBOOT=1."
 	echo "Raw check command:"
 	echo "dd if=$TARGET_ZYFW of=/tmp/final_zyfwinfo_check.bin bs=1024 count=1 2>/dev/null; hexdump -C /tmp/final_zyfwinfo_check.bin"
 	exit 0
 fi
 
+apply_fip_switch_if_needed "$MTD_FIP"
 apply_zloader_switch_if_needed "$MTD_ZLOADER"
 sync
 
