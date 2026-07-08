@@ -58,6 +58,27 @@ This bundle provides a safe way to install OpenWrt on the Zyxel EX5601-T0 router
 
 ---
 
+
+### Troubleshooting
+> [!IMPORTANT]
+> > These command will create a log, check the log of diagnoses result. If unclear, contact the author or create an issue using repository page.
+On SSH after the command `loader.sh`. When it starts LUCI , run the following command:  
+```sh  
+# Normal staging:
+ /tmp/matrix_boot_initramfs.sh
+# Stage without reboot:
+NO_REBOOT=1 /tmp/matrix_boot_initramfs.sh
+# Read-only no-UART diagnosis:
+/tmp/matrix_boot_initramfs.sh --diagnose
+# Optional custom initramfs path:
+INITRAMFS=/tmp/initramfs.bin /tmp/matrix_boot_initramfs.sh
+```  
+For diagnostic testing, stock layout try
+```sh
+/tmp/matrix_flash_inactive.sh --diagnose  
+```
+
+
 ### How to create miniroot from source
 
 To create `openwrt_chroot_rootfs.tar.gz` file, follow these steps:
