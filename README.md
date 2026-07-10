@@ -77,7 +77,8 @@ For diagnostic testing, stock layout try
 ```sh
 /tmp/matrix_flash_inactive.sh --diagnose  
 ```
-
+> [!WARNING]
+> If the router boots back to the OEM after the script completes successfully, try a different conversion option. If it still fails, go for a UART-based installation, as repeatedly attempting may brick your router.
 
 ### How to create miniroot from source
 
