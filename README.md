@@ -6,10 +6,10 @@ The installation works from the SSH on OEM firmware, all you need is a single ta
 
 > [!WARNING]
 > Power loss during flash can brick the device.
-> Keep backups of important MTD partitions before flash
+> Keep backups of important MTD partitions before flashing 
 
 ## Online Install
-Make sure internet connection is working on router, then use these commands, head to LUCI at port 8080 to finish installation 
+If internet connection is working on router, use these commands, head to LUCI at port 8080 to finish installation 
 ```bash
 cd /tmp
 wget \
@@ -19,6 +19,7 @@ chmod +x loader.sh ; ./loader.sh
 ```
 
 ## Offline Install 
+If there is no internet connection on router
 > Download latest release:  [openwrt_t56_installer_v2.zip](https://github.com/majad00/ex5601_openwrt_loader/releases/download/1.1/openwrt_t56_installer_v2.zip)
 ### Zip include two files:
 1) Miniroot Archive (openwrt_chroot_rootfs.tar.gz)
@@ -78,7 +79,7 @@ For diagnostic testing, stock layout try
 /tmp/matrix_flash_inactive.sh --diagnose  
 ```
 > [!WARNING]
-> If the router boots back to the OEM after the script completes successfully, try a different conversion option. If it still fails, go for a UART-based installation, as repeatedly attempting may brick your router.
+> If router boot to the OEM after script completes, try a different conversion option. If it still fails, go for a UART-based installation, as repeated failing attempting may brick your router.
 
 ### How to create miniroot from source
 
