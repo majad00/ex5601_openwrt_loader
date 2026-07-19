@@ -48,6 +48,8 @@ chmod +x /tmp/loader.sh
 
 Once the script completes, LUCI web server will be running in your RAM at port 8080. 
 Flash Openwrt from LUCI menu ... System > Install matrix > and select to flash Openwrt-stock layout or U-boot layout.
+> [!Tip]
+> You can use LUCI menu ( System > Backup ) to backup current firmware
 ### Router reboot at the end , usually it take 30 to 50 seconds for full installation.
 
 ## Expert's Guide
