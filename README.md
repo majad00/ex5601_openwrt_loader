@@ -1,7 +1,7 @@
 # Openwrt Installer for Zyxel EX5601-T0 / EX5601-T1 routers
-## Work on Generic ACDZ and most ISP specific ACEA ACQQ or ACID Firmwares
+### Tested on Generic ACDZ and most ISP specific ACEA ACQQ ACEN or ACID Firmwares
 
-**This tool works without UART connection.**
+**This tool will install openwrt on router without UART connection.**
 The installation works from the SSH on OEM firmware, all you need is a single tar file and a script copied to /tmp directory.
 
 > [!WARNING]
@@ -121,9 +121,8 @@ cp openwrt_ubi.bin openwrt_ubi2.bin ../rootfs/etc/
 # 5. Create the rootfs archive
 cd ../rootfs
 tar -cpzf ../openwrt_chroot_rootfs.tar.gz . ; cd ..
-```  
+```
 
-
-Latest update: U-bootmod layout conversion from the Matrix LuCI interface is possible now
+> The tool is licensed under the GPL v2 (GNU General Public License version 2).
 
 
