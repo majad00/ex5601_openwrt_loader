@@ -95,7 +95,7 @@ return view.extend({
 				ubootmodButton,
 				_('Flash OpenWrt-Uboot Layout'),
 				callStartUbootmod,
-				_('This will reboot for OpenWrt U-Boot flashing in inintramfs, and can take about two min. Continue?')
+				_('This will reboot for OpenWrt U-Boot flashing in inintramfs, and can take about two minutes. Continue?')
 			);
 		});
 
@@ -104,7 +104,7 @@ return view.extend({
 				if (res && res.log)
 					logBox.textContent = res.log;
 			}).catch(function() {
-				logBox.textContent = 'Unable to read Matrix status.';
+				logBox.textContent = 'Wait for two minutes before connecting to 192.168.1.1.';
 			});
 		}
 
@@ -129,7 +129,7 @@ return view.extend({
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, [ _('U-Boot layout installer') ]),
 				E('p', {}, [
-					_('After STATUS say "Unable to read Matrix status", please wait two minutes and then connect at 192.168.1.1 ( NO POWER OFF).')
+					_('Installation is working on the device ... ( NO POWER OFF).')
 				]),
 				E('p', {}, [ ubootmodButton ])
 			]),

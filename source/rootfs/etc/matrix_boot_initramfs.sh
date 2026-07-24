@@ -1,5 +1,6 @@
 #!/bin/sh
 # Matrix EX5601-T0 ubootmod initramfs stager - UNIVERSAL VERSION 3
+# PROJECT A
 # Works on firmware 3.x / 4.x / 5.x stock layout.
 # written by majad qureshi at lut .fi
 # Modified for universal boot switching and no-UART diagnosis.

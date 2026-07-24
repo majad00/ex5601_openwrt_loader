@@ -198,7 +198,7 @@ sleep 2
 /usr/sbin/uhttpd -f -p 8080 -h /www -r Matrix-OpenWrt &
 /sbin/procd &
 echo "================================================"
-echo "      EX5601-T0 OpenWrt Installer V2.1"
+echo "      EX5601-T0 OpenWrt Installer V3"
 echo "================================================"
 echo "------------------------------------------------"
 echo " SUCCESS: Access LUCI at PORT 8080"
