@@ -1,12 +1,7 @@
 # Openwrt Installer for Zyxel EX5601-T0 / EX5601-T1 routers
 ### Tested on Generic ACDZ and most ISP specific ACEA ACQQ ACEN and ACID Firmwares
 
-**This tool works without UART connection.**
-The installation works from the SSH on OEM firmware, all you need is a single tar file and a script copied to /tmp directory.
-
-> [!WARNING]
-> Power loss during flash can brick the device.
-> Keep backups of important MTD partitions before flashing 
+**Installation require SSH access with root permission on OEM firmware, NO UART/Serial connection needed**
 
 ## Online Install
 If internet connection is working on router, use these commands, head to LUCI at port 8080 to finish installation 
@@ -38,19 +33,21 @@ cp /mnt/usb/openwrt_chroot_rootfs.tar.gz /tmp
 cp /mnt/usb/loader.sh /tmp
 
 ```
-> Starting
+### Starting
 
-(Assuming you have root access on SSH)
+> [!Tip]
+> You can use LUCI menu ( System > Backup ) to backup current firmware
+
 ```bash
+#With root access on SSH
 chmod +x /tmp/loader.sh
 /tmp/loader.sh
 ```
 
-Once the script completes, LUCI web server will be running in RAM at port 8080. 
+Once the script completes, LUCI web server start at port 8080. 
 Flash Openwrt from LUCI menu ... System > Install matrix > and select either stock or ubootmod layout.
-> [!Tip]
-> You can use LUCI menu ( System > Backup ) to backup current firmware
-### Router reboot at the end , usually it take 30 to 50 seconds for full installation.
+
+ Router reboot at the end , usually it take 30 to 50 seconds for full installation.
 
 ## Expert's Guide
 This bundle provides a safe way to install OpenWrt on the Zyxel EX5601-T0 router directly from the OEM firmware flashing inactive partition, how we do that.
@@ -64,8 +61,9 @@ This bundle provides a safe way to install OpenWrt on the Zyxel EX5601-T0 router
 
 ### Troubleshooting
 > [!IMPORTANT]
-> > These command will create a log, check the log of diagnoses result. If unclear, contact the author or create an issue using repository page.
-Start with SSH after the command `loader.sh` finishes and starts LUCI at port 8080.
+> > Create a detail log, and check the log for diagnoses result. If unclear, contact the author or create an issue using repository page.
+
+Start troubleshooting on SSH after the command `loader.sh` finishes and starts LUCI at port 8080.
 ```sh
 # Read-only no-UART diagnosis: Try this first
 /tmp/matrix_boot_initramfs.sh --diagnose
