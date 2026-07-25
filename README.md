@@ -1,7 +1,7 @@
 # Openwrt Installer for Zyxel EX5601-T0 / EX5601-T1 routers
-### Tested on Generic ACDZ and most ISP specific ACEA ACQQ ACEN or ACID Firmwares
+### Tested on Generic ACDZ and most ISP specific ACEA ACQQ ACEN and ACID Firmwares
 
-**This tool will install openwrt on router without UART connection.**
+**This tool works without UART connection.**
 The installation works from the SSH on OEM firmware, all you need is a single tar file and a script copied to /tmp directory.
 
 > [!WARNING]
@@ -20,7 +20,7 @@ chmod +x loader.sh ; ./loader.sh
 
 ## Offline Install 
 If there is no internet connection on router
-> Download latest release:  [openwrt_t56_installer_v2.zip](https://github.com/majad00/ex5601_openwrt_loader/releases/download/1.1/openwrt_t56_installer_v2.zip)
+> Download latest release:  [openwrt_t56_installer_v2.zip](https://github.com/majad00/ex5601_openwrt_loader/releases/download/2/openwrt_t56_installer_v2.zip)
 ### Zip include two files:
 1) Miniroot Archive (openwrt_chroot_rootfs.tar.gz)
 2) Main script (loader.sh ) 
@@ -46,8 +46,8 @@ chmod +x /tmp/loader.sh
 /tmp/loader.sh
 ```
 
-Once the script completes, LUCI web server will be running in your RAM at port 8080. 
-Flash Openwrt from LUCI menu ... System > Install matrix > and select to flash Openwrt-stock layout or U-boot layout.
+Once the script completes, LUCI web server will be running in RAM at port 8080. 
+Flash Openwrt from LUCI menu ... System > Install matrix > and select either stock or ubootmod layout.
 > [!Tip]
 > You can use LUCI menu ( System > Backup ) to backup current firmware
 ### Router reboot at the end , usually it take 30 to 50 seconds for full installation.
@@ -65,7 +65,7 @@ This bundle provides a safe way to install OpenWrt on the Zyxel EX5601-T0 router
 ### Troubleshooting
 > [!IMPORTANT]
 > > These command will create a log, check the log of diagnoses result. If unclear, contact the author or create an issue using repository page.
-On SSH after the command `loader.sh`. When it starts LUCI , run the following command:  
+Start with SSH after the command `loader.sh` finishes and starts LUCI at port 8080.
 ```sh
 # Read-only no-UART diagnosis: Try this first
 /tmp/matrix_boot_initramfs.sh --diagnose
@@ -81,8 +81,9 @@ For diagnostic testing, stock layout try
 /tmp/matrix_flash_inactive.sh --diagnose  
 ```
 > [!WARNING]
-> If router boot to the OEM after script completes, try a different conversion option. If it still fails, go for a UART-based installation, as repeated failing attempting may brick your router.
+> If router boot to the OEM after script completes, try a different conversion option (stokck Vs ubootmod). If it still fails, use UART-based installation, as repeated failing may brick your router.
 
+> you can always recover your router using UART and utilities like mtk_uarboot or de-bricker.
 ### How to create miniroot from source
 
 To create `openwrt_chroot_rootfs.tar.gz` file, follow these steps:
